@@ -21,9 +21,7 @@ umask 077
 while IFS= read -r existing_set; do
   "$validator" "$root" "$existing_set" >/dev/null || { echo 'refuse backup with invalid complete set' >&2; exit 70; }
 done < <(find "$root" -mindepth 1 -maxdepth 1 -type d -name 'set-*' -printf '%f\n' | sort)
-id="set-$(date -u +%Y%m%dT%H%M%SZ)"
-stage="$root/.staging-$id-$$"
-final="$root/$id"
+stage="$root/.staging-$$"
 trap 'rm -rf -- "$stage"' EXIT
 mkdir -m 0700 "$stage"
 "$vendor" "$stage"
@@ -33,6 +31,9 @@ mapfile -t archives < <(find "$stage" -maxdepth 1 -type f -name 'static_kubereso
 ts=${snapshots[0]#snapshot_}; ts=${ts%.db}
 [[ ${archives[0]} == "static_kuberesources_${ts}.tar.gz" ]] || { echo 'mismatched backup timestamps' >&2; exit 68; }
 [[ -f "$stage/${snapshots[0]}" && ! -L "$stage/${snapshots[0]}" && -f "$stage/${archives[0]}" && ! -L "$stage/${archives[0]}" ]] || { echo 'unsafe backup member' >&2; exit 69; }
+id="set-$ts"
+final="$root/$id"
+[[ ! -e $final ]] || { echo 'backup set timestamp already exists' >&2; exit 68; }
 (cd "$stage" && sha256sum "${snapshots[0]}" "${archives[0]}") > "$stage/SHA256SUMS"
 snapshot_sha256=$(awk -v name="${snapshots[0]}" '$2 == name { print $1 }' "$stage/SHA256SUMS")
 resources_sha256=$(awk -v name="${archives[0]}" '$2 == name { print $1 }' "$stage/SHA256SUMS")

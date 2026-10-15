@@ -87,6 +87,13 @@ class BackupHarnessTests(unittest.TestCase):
         self.assertNotEqual(subprocess.run(['/usr/bin/flock', '-n', str(lock), '/bin/true']).returncode, 0)
         held.wait()
 
+    def test_runner_uses_vendor_pair_timestamp_for_set_id(self):
+        self.vendor.write_text('#!/bin/sh\nset -eu\nd=$1; echo marker > "$d/snapshot_20261015T000000Z.db"; echo keys > "$d/static_kuberesources_20261015T000000Z.tar.gz"\n')
+        self.vendor.chmod(0o700)
+        result = self.run_backup()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue((self.root / 'set-20261015T000000Z' / 'COMPLETE').is_file())
+
     def test_validator_excludes_corrupt_candidate(self):
         self.assertEqual(self.run_backup().returncode, 0)
         valid = next(self.root.glob('set-*'))
