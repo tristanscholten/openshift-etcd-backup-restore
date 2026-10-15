@@ -14,7 +14,7 @@ import subprocess
 import sys
 import tempfile
 
-ROOT = pathlib.Path(__file__).resolve().parents[1]
+ROOT = pathlib.Path(os.environ.get("RESTORE_FIXTURE_ROOT", pathlib.Path(__file__).resolve().parents[1]))
 PLAYBOOK = ROOT / "playbooks" / "restore.yml"
 VALIDATOR = ROOT / "scripts" / "validate_backup.py"
 SET_ID = "set-20261015T000000Z"
@@ -48,7 +48,10 @@ def build_fixture(scenario: str) -> tuple[pathlib.Path, pathlib.Path, pathlib.Pa
         peers = []
         for number in (1, 2):
             peers.append({"inventory_hostname": f"cp{number}", "ssh_host_identity": f"host-{number}", "node_name": f"node-{number}", "node_uid": f"node-uid-{number}", "provider_id": f"provider-{number}", "machine_name": f"machine-{number}", "machine_uid": f"machine-uid-{number}", "machine_node_ref_name": f"node-{number}", "machine_node_ref_uid": f"node-uid-{number}", "machine_provider_id": f"provider-{number}"})
-        inventory = {"schema_version": 1, "capture": {"backup_set_id": SET_ID, "pair_payload_sha256": digest, "cluster_id": "fixture", "ocp_version": selected_version, "ssh_host_identity_command": identity_command}, "machine_api": {"api_version": "machine.openshift.io/v1beta1", "namespace": "openshift-machine-api"}, "control_plane": {"replicas": 3, "recovery_host": {"inventory_hostname": "cp0", "ssh_host_identity": "host-0", "node_name": "node-0", "node_uid": "node-uid-0", "provider_id": "provider-0"}, "non_recovery": peers}, "cpms": {"required": False, "observed_absent": True}}
+        inventory = {"schema_version": 1, "capture": {"backup_set_id": SET_ID, "pair_payload_sha256": digest, "cluster_id": "fixture", "ocp_version": selected_version, "ssh_host_identity_command": identity_command}, "machine_api": {"api_version": "machine.openshift.io/v1beta1", "namespace": "openshift-machine-api"}, "control_plane": {"replicas": 3, "recovery_host": {"inventory_hostname": "cp0", "ssh_host_identity": "host-0", "node_name": "node-0", "node_uid": "node-uid-0", "provider_id": "provider-0", "machine_name": "machine-0", "machine_uid": "machine-uid-0", "machine_node_ref_name": "node-0", "machine_node_ref_uid": "node-uid-0", "machine_provider_id": "provider-0"}, "non_recovery": peers}, "cpms": {"required": False, "observed_absent": True}}
+        if scenario == "duplicate-inventory":
+            inventory["control_plane"]["non_recovery"][1]["node_uid"] = "node-uid-1"
+            inventory["control_plane"]["non_recovery"][1]["machine_node_ref_uid"] = "node-uid-1"
         raw = json.dumps(inventory, sort_keys=True).encode()
         (backup / "machine-recovery-inventory-v1.json").write_bytes(raw)
         (backup / "machine-recovery-inventory-v1.json").chmod(0o600)
@@ -70,14 +73,37 @@ def build_fixture(scenario: str) -> tuple[pathlib.Path, pathlib.Path, pathlib.Pa
     script(bin_dir / "restore", f'#!/bin/sh\nprintf "vendor-restore\n" >> "{trace}"\n')
     script(bin_dir / "disable", disable_body)
     script(bin_dir / "oc", f'''#!/usr/bin/env python3
-import json, sys
+import json, pathlib, sys
+scenario = {scenario!r}
 args = sys.argv[1:]
 with open("{trace}", "a") as trace_file: trace_file.write("oc:" + " ".join(args) + "\\n")
+deleted = pathlib.Path("{fixture / 'deleted'}")
+removed = deleted.read_text().split(",") if deleted.exists() else []
+if "delete" in args:
+    peer = "2" if "cp2.machine.json" in " ".join(args) else "1"
+    deleted.write_text(",".join([*removed, peer]))
+    sys.exit(0)
+def machine(n, replacement=False):
+    prefix = "replacement-" if replacement else ""
+    return {{"metadata": {{"name": f"{{prefix}}machine-{{n}}", "uid": f"{{prefix}}machine-uid-{{n}}", "labels": {{"machine.openshift.io/cluster-api-machine-role": "master"}}}}, "status": {{"nodeRef": {{"name": f"{{prefix}}node-{{n}}", "uid": f"{{prefix}}node-uid-{{n}}"}}}}, "spec": {{"providerID": f"{{prefix}}provider-{{n}}"}}}}
+def node(n, replacement=False):
+    prefix = "replacement-" if replacement else ""
+    return {{"metadata": {{"name": f"{{prefix}}node-{{n}}", "uid": f"{{prefix}}node-uid-{{n}}"}}, "spec": {{"providerID": f"{{prefix}}provider-{{n}}"}}}}
 if "get" in args:
     target = args[args.index("get") + 1]
     if target == "machines":
-        print(json.dumps({{"items": [{{"metadata": {{"name": f"machine-{{n}}", "uid": f"machine-uid-{{n}}", "labels": {{"machine.openshift.io/cluster-api-machine-role": "master"}}}}, "status": {{"nodeRef": {{"name": f"node-{{n}}", "uid": f"node-uid-{{n}}"}}}}, "spec": {{"providerID": f"provider-{{n}}"}}}} for n in (1,2)]}}))
-    elif target == "nodes": print(json.dumps({{"items": [{{"metadata": {{"name": f"node-{{n}}", "uid": f"node-uid-{{n}}"}}, "spec": {{"providerID": f"provider-{{n}}"}}}} for n in (1,2)]}}))
+        items = [machine(n) for n in (0, 1, 2) if str(n) not in removed]
+        if scenario != "replacement-absent": items += [machine(n, True) for n in removed]
+        if scenario == "extra-master": items.append(machine(9))
+        print(json.dumps({{"items": items}}))
+    elif target == "nodes":
+        items = [node(n) for n in (0, 1, 2)]
+        if scenario != "replacement-absent": items += [node(n, True) for n in removed]
+        if scenario == "recovery-mismatch": items[0]["metadata"]["uid"] = "wrong-recovery-uid"
+        print(json.dumps({{"items": items}}))
+    elif target == "clusteroperators":
+        status, degraded = ("False", "True") if scenario == "unhealthy-operator" and not removed else ("True", "False")
+        print(json.dumps({{"items":[{{"metadata":{{"name":n}},"status":{{"conditions":[{{"type":"Available","status":status}},{{"type":"Degraded","status":degraded}}]}}}} for n in ("etcd","kube-apiserver","machine-api")]}}))
     else: print(json.dumps({{"items": []}}))
 ''')
     identity_body = '#!/bin/sh\nprintf "host-%s\\n" "${1#cp}"\n'
@@ -183,6 +209,19 @@ def run(scenario: str) -> None:
             else:
                 require("Installed versions must be equal OCP 4.20.z" in output, output)
                 require(not lines, lines)
+        elif scenario in {"recovery-mismatch", "extra-master", "unhealthy-operator"}:
+            require(result.returncode != 0 and "POST_API_MAP_RECONCILIATION_FAILED" in output, output)
+            require(not any(" delete " in line for line in lines), lines)
+            require(json.loads(state_file.read_text())["phase"] == "POST_API_MAP_RECONCILIATION_FAILED", state_file.read_text())
+        elif scenario == "replacement-absent":
+            require(result.returncode != 0 and "HA_MACHINE_RECOVERY_INCOMPLETE" in output, output)
+            deletes = [line for line in lines if " delete " in line]
+            require(len(deletes) == 1 and "cp1.machine.json" in deletes[0], deletes)
+            require(json.loads(state_file.read_text())["phase"] == "HA_MACHINE_RECOVERY_INCOMPLETE", state_file.read_text())
+        elif scenario == "duplicate-inventory":
+            require(result.returncode != 0 and "duplicate HA Node UID" in output, output)
+            require(not any("timer-stop" in line or "fence" in line for line in lines), lines)
+            require(not state_file.exists(), state_file.exists())
         elif scenario == "identity-mismatch":
             require(result.returncode != 0 and "HA_OFFLINE_IDENTITY_EVIDENCE_MISMATCH" in output, output)
             require(lines == [f"validate:{SET_ID}"] and not state_file.exists(), (lines, state_file.exists()))
@@ -195,5 +234,5 @@ def run(scenario: str) -> None:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("scenario", choices=["ha", "sno", "missing-oc", "fence-fail", "container", "rerun", "check", "mixed-patch", "unknown-minor", "selected-mismatch", "identity-mismatch"])
+    parser.add_argument("scenario", choices=["ha", "sno", "missing-oc", "fence-fail", "container", "rerun", "check", "mixed-patch", "unknown-minor", "selected-mismatch", "identity-mismatch", "recovery-mismatch", "extra-master", "unhealthy-operator", "replacement-absent", "duplicate-inventory"])
     run(parser.parse_args().scenario)

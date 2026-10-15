@@ -11,7 +11,7 @@ from typing import NoReturn
 SET_ID = re.compile(r"^set-[0-9]{8}T[0-9]{6}Z$")
 SHA256 = re.compile(r"^[0-9a-f]{64}$")
 MACHINE_API = "machine.openshift.io/v1beta1"
-CPMS_API = "controlplanemachineset.machine.openshift.io/v1"
+CPMS_API = "machine.openshift.io/v1"
 
 
 def fail(message: str) -> NoReturn:
@@ -103,16 +103,33 @@ def validate_machine_inventory(candidate: pathlib.Path, data: dict) -> None:
     if not isinstance(recovery, dict) or not isinstance(peers, list) or len(peers) != 2:
         fail("incomplete HA host inventory")
     identities: set[str] = set()
+    hostnames: set[str] = set()
+    node_names: set[str] = set()
+    node_uids: set[str] = set()
+    provider_ids: set[str] = set()
     machines: set[str] = set()
+    machine_uids: set[str] = set()
+    machine_node_names: set[str] = set()
+    machine_node_uids: set[str] = set()
+    machine_provider_ids: set[str] = set()
     for entry in [recovery, *peers]:
         if not isinstance(entry, dict):
             fail("invalid HA host inventory")
-        for field in ("inventory_hostname", "ssh_host_identity", "node_name", "node_uid", "provider_id"):
+        for field in ("inventory_hostname", "ssh_host_identity", "node_name", "node_uid", "provider_id", "machine_name", "machine_uid", "machine_node_ref_name", "machine_node_ref_uid", "machine_provider_id"):
             require_string(entry.get(field), field)
         identity = require_string(entry["ssh_host_identity"], "ssh_host_identity")
         if identity in identities:
             fail("duplicate HA SSH identity")
         identities.add(identity)
+        for value, seen, label in (
+            (entry["inventory_hostname"], hostnames, "inventory hostname"),
+            (entry["node_name"], node_names, "Node name"),
+            (entry["node_uid"], node_uids, "Node UID"),
+            (entry["provider_id"], provider_ids, "provider ID"),
+        ):
+            if value in seen:
+                fail(f"duplicate HA {label}")
+            seen.add(value)
     for peer in peers:
         for field in ("machine_name", "machine_uid", "machine_node_ref_name", "machine_node_ref_uid", "machine_provider_id"):
             require_string(peer.get(field), field)
@@ -120,6 +137,15 @@ def validate_machine_inventory(candidate: pathlib.Path, data: dict) -> None:
         if machine in machines:
             fail("duplicate HA Machine identity")
         machines.add(machine)
+        for value, seen, label in (
+            (peer["machine_uid"], machine_uids, "Machine UID"),
+            (peer["machine_node_ref_name"], machine_node_names, "Machine NodeRef name"),
+            (peer["machine_node_ref_uid"], machine_node_uids, "Machine NodeRef UID"),
+            (peer["machine_provider_id"], machine_provider_ids, "Machine provider ID"),
+        ):
+            if value in seen:
+                fail(f"duplicate HA {label}")
+            seen.add(value)
     required_cpms = cpms.get("required")
     if not isinstance(required_cpms, bool):
         fail("invalid CPMS requirement")

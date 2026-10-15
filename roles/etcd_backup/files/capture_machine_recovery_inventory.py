@@ -13,7 +13,7 @@ import sys
 from datetime import datetime, timezone
 
 MACHINE_API = "machine.openshift.io/v1beta1"
-CPMS_API = "controlplanemachineset.machine.openshift.io/v1"
+CPMS_API = "machine.openshift.io/v1"
 NAMESPACE = "openshift-machine-api"
 ROLE = "machine.openshift.io/cluster-api-machine-role"
 
@@ -136,9 +136,9 @@ def main() -> None:
     records = {}
     for machine, node_name in selected:
         host = host_by_node[node_name]
-        record = {**host, "node_name": node_name, **node_records[node_name]}
-        if host["inventory_hostname"] != recovery_name:
-            record.update({"machine_name": obj_field(machine, "metadata", "name"), "machine_uid": obj_field(machine, "metadata", "uid"), "machine_node_ref_name": node_name, "machine_node_ref_uid": node_records[node_name]["node_uid"], "machine_provider_id": node_records[node_name]["provider_id"]})
+        # Preserve all three Machine identities, including the recovery host: the
+        # post-API gate must reject an unrelated extra/replaced control-plane node.
+        record = {**host, "node_name": node_name, **node_records[node_name], "machine_name": obj_field(machine, "metadata", "name"), "machine_uid": obj_field(machine, "metadata", "uid"), "machine_node_ref_name": node_name, "machine_node_ref_uid": node_records[node_name]["node_uid"], "machine_provider_id": node_records[node_name]["provider_id"]}
         records[host["inventory_hostname"]] = record
     inventory = {"schema_version": 1, "capture": {"captured_at_rfc3339": datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z"), "ocp_version": nonempty(pair.get("ocp_version"), "ocp_version"), "cluster_id": nonempty(pair.get("cluster_id"), "cluster_id"), "infrastructure_name": cluster_id, "backup_set_id": set_id, "pair_payload_sha256": nonempty(pair.get("pair_payload_sha256"), "pair_payload_sha256"), "management_mode": mode, "ssh_host_identity_command": identity_command}, "control_plane": {"replicas": 3, "recovery_host": records[recovery_name], "non_recovery": [records[name] for name in sorted(records) if name != recovery_name]}, "machine_api": {"namespace": NAMESPACE, "api_version": MACHINE_API, "control_plane_selector": ROLE + "=master"}, "cpms": cpms}
     pathlib.Path(output).write_text(json.dumps(inventory, sort_keys=True, separators=(",", ":")) + "\n", encoding="utf-8")
