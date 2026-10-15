@@ -1,9 +1,9 @@
 ---
 - name: Delete one exact mapped non-recovery Machine
   block:
-    - name: Delete mapped Machine
+    - name: Delete exact reconciled Machine with UID precondition
       ansible.builtin.command:
-        argv: ['{{ restore_oc_path }}', '--kubeconfig={{ post_api_kubeconfig }}', delete, machine, '--namespace=openshift-machine-api', '{{ ha_peer.value }}']
+        argv: ['{{ restore_oc_path }}', '--kubeconfig={{ post_api_kubeconfig }}', delete, '-f', '{{ restore_controller_state_dir }}/{{ restore_selection }}/reconciled/{{ ha_peer.inventory_hostname }}.machine.json']
       changed_when: true
       delegate_to: localhost
       become: false
@@ -17,7 +17,7 @@
 
     - name: Record recovered peer checkpoint
       ansible.builtin.copy:
-        content: '{"phase":"HA_MACHINE_RECOVERY","set_id":"{{ restore_selection }}","recovered_peer":"{{ ha_peer.key }}","next_safe_action":"continue only after each stability gate"}'
+        content: '{"phase":"HA_MACHINE_RECOVERY","set_id":"{{ restore_selection }}","recovered_peer":"{{ ha_peer.inventory_hostname }}","next_safe_action":"continue only after each stability gate"}'
         dest: '{{ restore_controller_state_dir }}/{{ restore_selection }}.json'
         mode: '0600'
       delegate_to: localhost
@@ -25,11 +25,11 @@
   rescue:
     - name: Persist peer recovery failure checkpoint
       ansible.builtin.copy:
-        content: '{"phase":"HA_MACHINE_RECOVERY_FAILED","set_id":"{{ restore_selection }}","failed_peer":"{{ ha_peer.key }}","next_safe_action":"do not rerun; assess failed Machine recovery"}'
+        content: '{"phase":"HA_MACHINE_RECOVERY_INCOMPLETE","set_id":"{{ restore_selection }}","failed_peer":"{{ ha_peer.inventory_hostname }}","next_safe_action":"do not rerun; assess failed Machine recovery"}'
         dest: '{{ restore_controller_state_dir }}/{{ restore_selection }}.json'
         mode: '0600'
       delegate_to: localhost
       become: false
     - name: Stop after peer recovery failure
       ansible.builtin.fail:
-        msg: 'HA_MACHINE_RECOVERY_FAILED: {{ ha_peer.key }} did not complete documented stability gate; inspect checkpoint.'
+        msg: 'HA_MACHINE_RECOVERY_INCOMPLETE: {{ ha_peer.inventory_hostname }} did not complete documented stability gate; inspect checkpoint.'

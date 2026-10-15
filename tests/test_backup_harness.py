@@ -115,7 +115,7 @@ class RestoreContractTests(unittest.TestCase):
         finally:
             inventory.unlink(missing_ok=True)
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn('Unsupported topology, exact non-recovery Machine mapping', result.stdout + result.stderr)
+        self.assertIn('existing readable regular certificate kubeconfig', result.stdout + result.stderr)
         self.assertNotIn('Stop backup timers on all hosts', result.stdout + result.stderr)
 
     def test_actual_ansible_missing_kubeconfig_stops_before_mutation(self):
@@ -142,8 +142,9 @@ class RestoreContractTests(unittest.TestCase):
 
     def test_playbooks_have_executable_guardrail_shapes(self):
         restore, listing, uninstall, peer = (p.read_text() for p in (RESTORE, LIST, UNINSTALL, HA_PEER))
-        self.assertIn('ha_machine_map.keys()', restore)
-        self.assertIn('Recreate each mapped HA machine and wait before next', restore)
+        self.assertNotIn('ha_machine_map', restore)
+        self.assertIn('Reconcile captured HA identities with restored API before any deletion', restore)
+        self.assertIn('Recreate each captured HA Machine and wait before next', restore)
         self.assertIn('Validate every candidate without reading archive content', listing)
         self.assertIn('backup_uninstall_confirm', uninstall)
         self.assertIn('Persist peer recovery failure checkpoint', peer)

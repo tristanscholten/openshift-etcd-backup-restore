@@ -40,11 +40,20 @@ def build_fixture(scenario: str) -> tuple[pathlib.Path, pathlib.Path, pathlib.Pa
     (backup / "SHA256SUMS").write_text("".join(
         f"{hashlib.sha256((backup / name).read_bytes()).hexdigest()}  {name}\n" for name in (snapshot, static)
     ))
-    (backup / "metadata.json").write_text(json.dumps({
-        "schema": 1, "set_id": SET_ID, "timestamp": "20261015T000000Z",
-        "ocp_version": selected_version, "cluster_id": "fixture",
-        "snapshot": snapshot, "static_resources": static,
-    }))
+    metadata = {"schema": 1, "set_id": SET_ID, "timestamp": "20261015T000000Z", "ocp_version": selected_version, "cluster_id": "fixture", "snapshot": snapshot, "static_resources": static}
+    if scenario != "sno":
+        pair = {"cluster_id": "fixture", "ocp_version": selected_version, "set_id": SET_ID, "snapshot": snapshot, "snapshot_sha256": hashlib.sha256((backup / snapshot).read_bytes()).hexdigest(), "static_resources": static, "static_resources_sha256": hashlib.sha256((backup / static).read_bytes()).hexdigest()}
+        digest = hashlib.sha256(json.dumps(pair, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+        peers = []
+        for number in (1, 2):
+            peers.append({"inventory_hostname": f"cp{number}", "ssh_host_identity": f"host-{number}", "node_name": f"node-{number}", "node_uid": f"node-uid-{number}", "provider_id": f"provider-{number}", "machine_name": f"machine-{number}", "machine_uid": f"machine-uid-{number}", "machine_node_ref_name": f"node-{number}", "machine_node_ref_uid": f"node-uid-{number}", "machine_provider_id": f"provider-{number}"})
+        inventory = {"schema_version": 1, "capture": {"backup_set_id": SET_ID, "pair_payload_sha256": digest, "cluster_id": "fixture", "ocp_version": selected_version}, "machine_api": {"api_version": "machine.openshift.io/v1beta1", "namespace": "openshift-machine-api"}, "control_plane": {"replicas": 3, "recovery_host": {"inventory_hostname": "cp0", "ssh_host_identity": "host-0", "node_name": "node-0", "node_uid": "node-uid-0", "provider_id": "provider-0"}, "non_recovery": peers}, "cpms": {"required": False, "observed_absent": True}}
+        raw = json.dumps(inventory, sort_keys=True).encode()
+        (backup / "machine-recovery-inventory-v1.json").write_bytes(raw)
+        (backup / "machine-recovery-inventory-v1.json").chmod(0o600)
+        with (backup / "SHA256SUMS").open("a") as sums: sums.write(f"{hashlib.sha256(raw).hexdigest()}  machine-recovery-inventory-v1.json\n")
+        metadata.update({"schema": 2, "restore_topology": "ha", "pair_payload_sha256": digest, "machine_recovery_inventory": "machine-recovery-inventory-v1.json", "machine_recovery_inventory_sha256": hashlib.sha256(raw).hexdigest()})
+    (backup / "metadata.json").write_text(json.dumps(metadata))
     (backup / "COMPLETE").write_text("")
     validator = bin_dir / "validator"
     script(validator, f'#!/bin/sh\nprintf "validate:$2\n" >> "{trace}"\nexec "{sys.executable}" "{VALIDATOR}" "$@"\n')
@@ -59,7 +68,17 @@ def build_fixture(scenario: str) -> tuple[pathlib.Path, pathlib.Path, pathlib.Pa
     script(bin_dir / "crictl", crictl_body)
     script(bin_dir / "restore", f'#!/bin/sh\nprintf "vendor-restore\n" >> "{trace}"\n')
     script(bin_dir / "disable", disable_body)
-    script(bin_dir / "oc", f'#!/bin/sh\nprintf "oc:%s\n" "$*" >> "{trace}"\n')
+    script(bin_dir / "oc", f'''#!/usr/bin/env python3
+import json, sys
+args = sys.argv[1:]
+with open("{trace}", "a") as trace_file: trace_file.write("oc:" + " ".join(args) + "\\n")
+if "get" in args:
+    target = args[args.index("get") + 1]
+    if target == "machines":
+        print(json.dumps({{"items": [{{"metadata": {{"name": f"machine-{{n}}", "uid": f"machine-uid-{{n}}", "labels": {{"machine.openshift.io/cluster-api-machine-role": "master"}}}}, "status": {{"nodeRef": {{"name": f"node-{{n}}", "uid": f"node-uid-{{n}}"}}}}, "spec": {{"providerID": f"provider-{{n}}"}}}} for n in (1,2)]}}))
+    elif target == "nodes": print(json.dumps({{"items": [{{"metadata": {{"name": f"node-{{n}}", "uid": f"node-uid-{{n}}"}}, "spec": {{"providerID": f"provider-{{n}}"}}}} for n in (1,2)]}}))
+    else: print(json.dumps({{"items": []}}))
+''')
     script(bin_dir / "action", f'#!/bin/sh\nprintf "%s:%s\n" "$1" "$2" >> "{trace}"\n')
     certs, manifest, kubeconfig = fixture / "certs", fixture / "manifest", fixture / "kubeconfig"
     certs.mkdir(); os.utime(certs, (1, 1))
@@ -129,7 +148,7 @@ def run(scenario: str) -> None:
             if scenario == "ha":
                 require(lines.count("fence") == 3, lines)
                 require(max(i for i, line in enumerate(lines) if line == "fence") < lines.index("vendor-restore"), lines)
-                first, second = (next(i for i, line in enumerate(lines) if f"machine-{n}" in line) for n in (1, 2))
+                first, second = (next(i for i, line in enumerate(lines) if f"cp{n}.machine.json" in line) for n in (1, 2))
                 require(any("wait-for-stable-cluster" in line for line in lines[first + 1:second]), lines)
             else:
                 require("fence" not in lines, lines)
