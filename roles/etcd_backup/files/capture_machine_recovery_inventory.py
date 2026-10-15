@@ -69,7 +69,10 @@ def main() -> None:
     config = json.loads(config_path.read_text(encoding="utf-8"))
     hosts = config.get("control_plane_hosts")
     recovery_name = config.get("recovery_host")
-    if not isinstance(hosts, list) or len(hosts) != 3 or not isinstance(recovery_name, str):
+    identity_command = config.get("ssh_host_identity_command")
+    if (not isinstance(hosts, list) or len(hosts) != 3 or not isinstance(recovery_name, str)
+            or not isinstance(identity_command, str) or not identity_command.startswith("/")
+            or any(character.isspace() for character in identity_command)):
         die("capture requires exactly three configured control-plane hosts")
     seen = set()
     host_by_node = {}
@@ -116,7 +119,12 @@ def main() -> None:
         cpms_obj = json.loads(cpms_result.stdout)
         if obj_field(cpms_obj, "apiVersion") != "machine.openshift.io/v1" or cpms_obj.get("spec", {}).get("state") != "Active" or cpms_obj.get("spec", {}).get("replicas") != 3:
             die("unsupported CPMS state")
-        cpms = {"required": True, "api_version": CPMS_API, "name": obj_field(cpms_obj, "metadata", "name"), "uid": obj_field(cpms_obj, "metadata", "uid"), "generation": cpms_obj.get("metadata", {}).get("generation"), "replicas": 3, "state": "Active", "controller_kind": "ControlPlaneMachineSet", "controller_uid": obj_field(cpms_obj, "metadata", "uid")}
+        cpms_uid = obj_field(cpms_obj, "metadata", "uid")
+        for machine, _ in selected:
+            references = machine.get("metadata", {}).get("ownerReferences", [])
+            if not any(isinstance(reference, dict) and reference.get("uid") == cpms_uid and reference.get("kind") == "ControlPlaneMachineSet" and reference.get("controller") is True for reference in references):
+                die("CPMS does not controller-own every captured control-plane Machine")
+        cpms = {"required": True, "api_version": CPMS_API, "name": obj_field(cpms_obj, "metadata", "name"), "uid": cpms_uid, "generation": cpms_obj.get("metadata", {}).get("generation"), "replicas": 3, "state": "Active", "controller_kind": "ControlPlaneMachineSet", "controller_uid": cpms_uid}
         mode = "cpms-active"
     elif cpms_result.returncode != 0 and "NotFound" in cpms_result.stderr:
         # Absence is an explicit supported mode; authorization, transport, and
@@ -132,7 +140,7 @@ def main() -> None:
         if host["inventory_hostname"] != recovery_name:
             record.update({"machine_name": obj_field(machine, "metadata", "name"), "machine_uid": obj_field(machine, "metadata", "uid"), "machine_node_ref_name": node_name, "machine_node_ref_uid": node_records[node_name]["node_uid"], "machine_provider_id": node_records[node_name]["provider_id"]})
         records[host["inventory_hostname"]] = record
-    inventory = {"schema_version": 1, "capture": {"captured_at_rfc3339": datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z"), "ocp_version": nonempty(pair.get("ocp_version"), "ocp_version"), "cluster_id": nonempty(pair.get("cluster_id"), "cluster_id"), "infrastructure_name": cluster_id, "backup_set_id": set_id, "pair_payload_sha256": nonempty(pair.get("pair_payload_sha256"), "pair_payload_sha256"), "management_mode": mode}, "control_plane": {"replicas": 3, "recovery_host": records[recovery_name], "non_recovery": [records[name] for name in sorted(records) if name != recovery_name]}, "machine_api": {"namespace": NAMESPACE, "api_version": MACHINE_API, "control_plane_selector": ROLE + "=master"}, "cpms": cpms}
+    inventory = {"schema_version": 1, "capture": {"captured_at_rfc3339": datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z"), "ocp_version": nonempty(pair.get("ocp_version"), "ocp_version"), "cluster_id": nonempty(pair.get("cluster_id"), "cluster_id"), "infrastructure_name": cluster_id, "backup_set_id": set_id, "pair_payload_sha256": nonempty(pair.get("pair_payload_sha256"), "pair_payload_sha256"), "management_mode": mode, "ssh_host_identity_command": identity_command}, "control_plane": {"replicas": 3, "recovery_host": records[recovery_name], "non_recovery": [records[name] for name in sorted(records) if name != recovery_name]}, "machine_api": {"namespace": NAMESPACE, "api_version": MACHINE_API, "control_plane_selector": ROLE + "=master"}, "cpms": cpms}
     pathlib.Path(output).write_text(json.dumps(inventory, sort_keys=True, separators=(",", ":")) + "\n", encoding="utf-8")
 
 

@@ -173,7 +173,7 @@ class RestoreContractTests(unittest.TestCase):
             self.assertIn(f'SIMULATED_ACTUAL_RESTORE_{scenario.upper()}_OK', result.stdout)
 
     def test_actual_playbook_simulated_fail_closed_matrix(self):
-        for scenario in ('missing-oc', 'fence-fail', 'container', 'rerun', 'check'):
+        for scenario in ('missing-oc', 'fence-fail', 'container', 'rerun', 'check', 'identity-mismatch'):
             result = subprocess.run([sys.executable, str(ACTUAL_FIXTURE), scenario], text=True, capture_output=True)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             self.assertIn(f'SIMULATED_ACTUAL_RESTORE_{scenario.upper()}_OK', result.stdout)

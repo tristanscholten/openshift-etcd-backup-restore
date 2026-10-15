@@ -132,6 +132,44 @@
         fail_msg: 'HA_OFFLINE_IDENTITY_EVIDENCE_MISSING: selected HA set has no validated bound inventory; no mutation occurred.'
       when: restore_topology == 'ha'
       run_once: true
+    - name: Read captured HA inventory from the validated selected source
+      ansible.builtin.slurp:
+        src: '{{ backup_root }}/{{ restore_selection }}/machine-recovery-inventory-v1.json'
+      delegate_to: '{{ backup_source_hostname }}'
+      run_once: true
+      register: restore_ha_inventory_raw
+      when: restore_topology == 'ha'
+    - name: Derive immutable offline HA topology evidence
+      ansible.builtin.set_fact:
+        restore_ha_inventory: '{{ restore_ha_inventory_raw.content | b64decode | from_json }}'
+      run_once: true
+      when: restore_topology == 'ha'
+    - name: Require exact offline HA host topology and forbid map overrides
+      ansible.builtin.assert:
+        that:
+          - ('ha_' ~ 'machine_map') not in vars
+          - (groups['control_plane'] | sort) == (([restore_ha_inventory.control_plane.recovery_host] + restore_ha_inventory.control_plane.non_recovery) | map(attribute='inventory_hostname') | list | sort)
+          - recovery_host == restore_ha_inventory.control_plane.recovery_host.inventory_hostname
+          - restore_ha_inventory.capture.ssh_host_identity_command is match('^/\\S+$')
+        fail_msg: 'HA_OFFLINE_IDENTITY_EVIDENCE_MISMATCH: control-plane topology, recovery host, or identity source differs; no mutation occurred.'
+      run_once: true
+      when: restore_topology == 'ha'
+    - name: Build captured HA SSH identity lookup
+      ansible.builtin.set_fact:
+        restore_ha_identity_by_host: "{{ ([restore_ha_inventory.control_plane.recovery_host] + restore_ha_inventory.control_plane.non_recovery) | items2dict(key_name='inventory_hostname', value_name='ssh_host_identity') }}"
+      run_once: true
+      when: restore_topology == 'ha'
+    - name: Reproduce each captured SSH host identity offline
+      ansible.builtin.command:
+        argv: ['{{ restore_ha_inventory.capture.ssh_host_identity_command }}', '{{ inventory_hostname }}']
+      changed_when: false
+      register: restore_ssh_host_identity
+      when: restore_topology == 'ha'
+    - name: Require each reached host to match captured SSH identity
+      ansible.builtin.assert:
+        that: restore_ssh_host_identity.stdout | trim == restore_ha_identity_by_host[inventory_hostname]
+        fail_msg: 'HA_OFFLINE_IDENTITY_EVIDENCE_MISMATCH: SSH host identity differs from the selected backup capture; no mutation occurred.'
+      when: restore_topology == 'ha' and not ansible_check_mode
     - name: Require vendor, runtime, and static-pod prerequisites on every host
       ansible.builtin.stat:
         path: '{{ item }}'

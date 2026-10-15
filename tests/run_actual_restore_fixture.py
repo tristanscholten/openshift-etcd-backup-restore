@@ -31,6 +31,7 @@ def build_fixture(scenario: str) -> tuple[pathlib.Path, pathlib.Path, pathlib.Pa
     backup = home / "etcd-backups" / SET_ID
     backup.mkdir(parents=True)
     bin_dir.mkdir()
+    identity_command = str(bin_dir / "identity")
     trace.write_text("")
     selected_version = "4.20.4" if scenario == "selected-mismatch" else "4.20.3"
     installed_version = "4.21.0" if scenario == "unknown-minor" else "4.20.3"
@@ -47,7 +48,7 @@ def build_fixture(scenario: str) -> tuple[pathlib.Path, pathlib.Path, pathlib.Pa
         peers = []
         for number in (1, 2):
             peers.append({"inventory_hostname": f"cp{number}", "ssh_host_identity": f"host-{number}", "node_name": f"node-{number}", "node_uid": f"node-uid-{number}", "provider_id": f"provider-{number}", "machine_name": f"machine-{number}", "machine_uid": f"machine-uid-{number}", "machine_node_ref_name": f"node-{number}", "machine_node_ref_uid": f"node-uid-{number}", "machine_provider_id": f"provider-{number}"})
-        inventory = {"schema_version": 1, "capture": {"backup_set_id": SET_ID, "pair_payload_sha256": digest, "cluster_id": "fixture", "ocp_version": selected_version}, "machine_api": {"api_version": "machine.openshift.io/v1beta1", "namespace": "openshift-machine-api"}, "control_plane": {"replicas": 3, "recovery_host": {"inventory_hostname": "cp0", "ssh_host_identity": "host-0", "node_name": "node-0", "node_uid": "node-uid-0", "provider_id": "provider-0"}, "non_recovery": peers}, "cpms": {"required": False, "observed_absent": True}}
+        inventory = {"schema_version": 1, "capture": {"backup_set_id": SET_ID, "pair_payload_sha256": digest, "cluster_id": "fixture", "ocp_version": selected_version, "ssh_host_identity_command": identity_command}, "machine_api": {"api_version": "machine.openshift.io/v1beta1", "namespace": "openshift-machine-api"}, "control_plane": {"replicas": 3, "recovery_host": {"inventory_hostname": "cp0", "ssh_host_identity": "host-0", "node_name": "node-0", "node_uid": "node-uid-0", "provider_id": "provider-0"}, "non_recovery": peers}, "cpms": {"required": False, "observed_absent": True}}
         raw = json.dumps(inventory, sort_keys=True).encode()
         (backup / "machine-recovery-inventory-v1.json").write_bytes(raw)
         (backup / "machine-recovery-inventory-v1.json").chmod(0o600)
@@ -79,6 +80,10 @@ if "get" in args:
     elif target == "nodes": print(json.dumps({{"items": [{{"metadata": {{"name": f"node-{{n}}", "uid": f"node-uid-{{n}}"}}, "spec": {{"providerID": f"provider-{{n}}"}}}} for n in (1,2)]}}))
     else: print(json.dumps({{"items": []}}))
 ''')
+    identity_body = '#!/bin/sh\nprintf "host-%s\\n" "${1#cp}"\n'
+    if scenario == "identity-mismatch":
+        identity_body = '#!/bin/sh\nprintf "wrong-host\\n"\n'
+    script(bin_dir / "identity", identity_body)
     script(bin_dir / "action", f'#!/bin/sh\nprintf "%s:%s\n" "$1" "$2" >> "{trace}"\n')
     certs, manifest, kubeconfig = fixture / "certs", fixture / "manifest", fixture / "kubeconfig"
     certs.mkdir(); os.utime(certs, (1, 1))
@@ -115,8 +120,7 @@ if "get" in args:
         "-e", f"restore_fixture_action_path={bin_dir / 'action'}", "-e", "restore_min_free_kb=1",
         "-e", "restore_fence_retries=1", "-e", "restore_fence_delay=0",
     ]
-    if len(hosts) == 3:
-        args.extend(["-e", '{"ha_machine_map":{"cp1":"machine-1","cp2":"machine-2"}}'])
+
     if scenario == "check":
         args.insert(1, "--check")
     if scenario == "rerun":
@@ -178,6 +182,9 @@ def run(scenario: str) -> None:
             else:
                 require("Installed versions must be equal OCP 4.20.z" in output, output)
                 require(not lines, lines)
+        elif scenario == "identity-mismatch":
+            require(result.returncode != 0 and "HA_OFFLINE_IDENTITY_EVIDENCE_MISMATCH" in output, output)
+            require(lines == [f"validate:{SET_ID}"] and not state_file.exists(), (lines, state_file.exists()))
         print(f"SIMULATED_ACTUAL_RESTORE_{scenario.upper()}_OK")
         print("\n".join(lines))
     finally:
@@ -187,5 +194,5 @@ def run(scenario: str) -> None:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("scenario", choices=["ha", "sno", "missing-oc", "fence-fail", "container", "rerun", "check", "mixed-patch", "unknown-minor", "selected-mismatch"])
+    parser.add_argument("scenario", choices=["ha", "sno", "missing-oc", "fence-fail", "container", "rerun", "check", "mixed-patch", "unknown-minor", "selected-mismatch", "identity-mismatch"])
     run(parser.parse_args().scenario)

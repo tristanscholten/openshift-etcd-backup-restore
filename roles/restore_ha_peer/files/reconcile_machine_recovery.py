@@ -81,6 +81,12 @@ def main() -> None:
         current = get(oc, kubeconfig, "controlplanemachineset.machine.openshift.io", cpms["name"], "-n", namespace)
         if text(current, "metadata", "uid") != cpms["uid"] or current.get("spec", {}).get("replicas") != 3 or current.get("spec", {}).get("state") != "Active":
             fail("POST_API_MAP_RECONCILIATION_FAILED: CPMS UID/state/replicas mismatch")
+        for machine in by_machine.values():
+            if machine.get("metadata", {}).get("name") not in expected:
+                continue
+            references = machine.get("metadata", {}).get("ownerReferences", [])
+            if not any(isinstance(reference, dict) and reference.get("uid") == cpms["controller_uid"] and reference.get("kind") == cpms["controller_kind"] and reference.get("controller") is True for reference in references):
+                fail("POST_API_MAP_RECONCILIATION_FAILED: CPMS does not controller-own captured Machine")
     else:
         result = subprocess.run([oc, f"--kubeconfig={kubeconfig}", "get", "controlplanemachineset.machine.openshift.io", "-n", namespace, "-o", "json"], text=True, capture_output=True, timeout=30)
         if result.returncode == 0 and json.loads(result.stdout).get("items"):
