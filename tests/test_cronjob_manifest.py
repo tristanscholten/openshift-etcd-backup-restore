@@ -62,7 +62,7 @@ class CronJobManifestTests(unittest.TestCase):
     def test_manifest_has_bounded_single_node_privileged_cronjob(self):
         docs = list(yaml.safe_load_all(MANIFEST.read_text()))
         kinds = [item['kind'] for item in docs]
-        self.assertEqual(kinds, ['Namespace', 'ServiceAccount', 'Role', 'RoleBinding', 'CronJob'])
+        self.assertEqual(kinds, ['Namespace', 'ServiceAccount', 'ClusterRole', 'ClusterRoleBinding', 'CronJob'])
         cronjob = docs[-1]['spec']
         self.assertEqual(cronjob['schedule'], '0 */6 * * *')
         self.assertEqual(cronjob['timeZone'], 'UTC')
