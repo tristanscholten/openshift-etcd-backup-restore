@@ -1,0 +1,20 @@
+---
+- name: Read-only backup discovery
+  hosts: control_plane
+  become: true
+  gather_facts: false
+  vars:
+    backup_root: /home/core/etcd-backups
+  tasks:
+    - name: List completion markers only
+      ansible.builtin.find:
+        paths: "{{ backup_root }}"
+        patterns: COMPLETE
+        file_type: file
+        recurse: false
+      register: completed
+      changed_when: false
+
+    - name: Print candidate directories without archive contents
+      ansible.builtin.debug:
+        msg: "{{ completed.files | map(attribute='path') | map('dirname') | list }}"

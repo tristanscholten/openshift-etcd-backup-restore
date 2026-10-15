@@ -1,0 +1,8 @@
+---
+backup_source_hostname: ""
+backup_root: /home/core/etcd-backups
+backup_user_home: /home/core
+backup_service_name: ocp-etcd-backup
+backup_install_confirm: false
+backup_catch_up_after_outage: false
+backup_vendor_script: /usr/local/bin/cluster-backup.sh

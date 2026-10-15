@@ -1,0 +1,37 @@
+#!/usr/bin/env bash
+# Runs only from a root-owned systemd unit. Never deletes incomplete sets.
+set -euo pipefail
+root=${1:?managed root required}
+vendor=${2:?vendor script required}
+[[ $root == /home/core/* && $root != *'..'* ]] || { echo 'unsafe managed root' >&2; exit 64; }
+[[ -d $root && ! -L $root && -x $vendor ]] || { echo 'unsafe root or vendor script' >&2; exit 65; }
+: "${OCP_ETCD_BACKUP_VERSION:?set exact OCP 4.20.z version}"
+: "${OCP_ETCD_BACKUP_CLUSTER_ID:?set cluster ID}"
+[[ $OCP_ETCD_BACKUP_VERSION =~ ^4\.20\.[0-9]+$ ]] || { echo 'unsupported OCP version' >&2; exit 66; }
+umask 077
+id=$(date -u +%Y%m%dT%H%M%SZ)
+stage="$root/.staging-$id-$$"
+final="$root/set-$id"
+trap 'rm -rf -- "$stage"' EXIT
+mkdir -m 0700 "$stage"
+"$vendor" "$stage"
+mapfile -t snapshots < <(find "$stage" -maxdepth 1 -type f -name 'snapshot_*.db' -printf '%f\n')
+mapfile -t archives < <(find "$stage" -maxdepth 1 -type f -name 'static_kuberesources_*.tar.gz' -printf '%f\n')
+[[ ${#snapshots[@]} -eq 1 && ${#archives[@]} -eq 1 ]] || { echo 'vendor did not create one backup pair' >&2; exit 67; }
+ts=${snapshots[0]#snapshot_}; ts=${ts%.db}
+[[ ${archives[0]} == "static_kuberesources_${ts}.tar.gz" ]] || { echo 'mismatched backup timestamps' >&2; exit 68; }
+[[ -f "$stage/${snapshots[0]}" && ! -L "$stage/${snapshots[0]}" && -f "$stage/${archives[0]}" && ! -L "$stage/${archives[0]}" ]] || exit 69
+sha256sum "$stage/${snapshots[0]}" "$stage/${archives[0]}" > "$stage/SHA256SUMS"
+printf '{"schema":1,"set_id":"%s","timestamp":"%s","ocp_version":"%s","cluster_id":"%s","snapshot":"%s","static_resources":"%s"}\n' \
+  "$id" "$ts" "$OCP_ETCD_BACKUP_VERSION" "$OCP_ETCD_BACKUP_CLUSTER_ID" "${snapshots[0]}" "${archives[0]}" > "$stage/metadata.json"
+chmod 0600 "$stage"/*
+mv -- "$stage" "$final"
+touch "$final/COMPLETE"; chmod 0600 "$final/COMPLETE"
+trap - EXIT
+mapfile -t complete < <(find "$root" -mindepth 1 -maxdepth 1 -type d -name 'set-*' -print | sort)
+if (( ${#complete[@]} > 3 )); then
+  for old in "${complete[@]:0:${#complete[@]}-3}"; do
+    [[ -f "$old/COMPLETE" && -f "$old/metadata.json" && ! -L "$old" ]] || { echo 'refuse unvalidated pruning' >&2; exit 70; }
+    rm -rf -- "$old"
+  done
+fi

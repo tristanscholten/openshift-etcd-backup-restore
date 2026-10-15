@@ -1,0 +1,10 @@
+[Unit]
+Description=Run OCP etcd backup every six hours UTC
+
+[Timer]
+OnCalendar=*-*-* 00,06,12,18:00:00 UTC
+Persistent={{ 'true' if backup_catch_up_after_outage else 'false' }}
+Unit={{ backup_service_name }}.service
+
+[Install]
+WantedBy=timers.target
