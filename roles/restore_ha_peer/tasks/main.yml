@@ -8,9 +8,9 @@
       delegate_to: localhost
       become: false
 
-    - name: Delete exact reconciled Machine with UID precondition
+    - name: Delete exact reconciled Machine through authenticated API with UID precondition
       ansible.builtin.command:
-        argv: ['{{ restore_oc_path }}', '--kubeconfig={{ post_api_kubeconfig }}', delete, '-f', '{{ restore_controller_state_dir }}/{{ restore_selection }}/reconciled/{{ ha_peer.inventory_hostname }}.machine.json']
+        argv: ['{{ restore_ha_uid_delete_path }}', '{{ restore_oc_path }}', '{{ post_api_kubeconfig }}', '{{ restore_ha_machine_namespace }}', '{{ ha_peer.machine_name }}', '{{ ha_peer.machine_uid }}']
       changed_when: true
       delegate_to: localhost
       become: false

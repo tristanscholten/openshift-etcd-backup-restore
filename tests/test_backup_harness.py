@@ -186,6 +186,12 @@ class RestoreContractTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             self.assertIn(f'SIMULATED_ACTUAL_RESTORE_{scenario.upper()}_OK', result.stdout)
 
+    def test_actual_playbook_machine_recovery_safety_matrix(self):
+        for scenario in ('recovery-mismatch', 'extra-master', 'unhealthy-operator', 'replacement-absent', 'replacement-unowned', 'name-reuse-conflict', 'duplicate-inventory'):
+            result = subprocess.run([sys.executable, str(ACTUAL_FIXTURE), scenario], text=True, capture_output=True)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn(f'SIMULATED_ACTUAL_RESTORE_{scenario.upper()}_OK', result.stdout)
+
 
 if __name__ == '__main__':
     unittest.main()

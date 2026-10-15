@@ -134,7 +134,7 @@ def check_cpms(oc: str, kubeconfig: str, namespace: str, cpms: dict, machines: l
             fail("CPMS does not controller-own every expected Machine")
 
 
-def write_replacement(output: pathlib.Path, peer: dict, machines: list, expected: dict) -> None:
+def find_replacement(machines: list, expected: dict, output: pathlib.Path) -> dict:
     candidates = [machine for machine in machines if control_machine(machine)]
     # All other expected Machines have already been checked. Only one unknown master
     # may therefore be the replacement for the just-deleted peer.
@@ -148,12 +148,17 @@ def write_replacement(output: pathlib.Path, peer: dict, machines: list, expected
     if len(unknown) != 1:
         fail("replacement Machine identity is absent or ambiguous")
     machine = unknown[0]
+    if not all((text(machine, "status", "nodeRef", "name"), text(machine, "status", "nodeRef", "uid"),
+                text(machine, "spec", "providerID"), text(machine, "metadata", "uid"))):
+        fail("replacement Machine identity incomplete")
+    return machine
+
+
+def write_replacement(output: pathlib.Path, peer: dict, machine: dict) -> None:
     node_name, node_uid, provider_id, machine_uid = (
         text(machine, "status", "nodeRef", "name"), text(machine, "status", "nodeRef", "uid"),
         text(machine, "spec", "providerID"), text(machine, "metadata", "uid"),
     )
-    if not all((node_name, node_uid, provider_id, machine_uid)):
-        fail("replacement Machine identity incomplete")
     replacement_path(output, peer["inventory_hostname"]).write_text(json.dumps({
         "machine_name": text(machine, "metadata", "name"), "machine_uid": machine_uid,
         "node_name": node_name, "node_uid": node_uid, "provider_id": provider_id,
@@ -190,6 +195,7 @@ def main() -> None:
         fail("exactly three control-plane Machines are required")
     if len({text(machine, "status", "nodeRef", "name") for machine in masters}) != 3:
         fail("selected control-plane Machines have duplicate NodeRefs")
+    replacement_machine = None
     if replacement:
         target = selected[0]
         if target["machine_name"] in by_machine:
@@ -203,9 +209,16 @@ def main() -> None:
         if not machine:
             fail("captured Machine absent")
         check_machine(machine, record)
-    check_cpms(oc, kubeconfig, inventory["machine_api"]["namespace"], inventory["cpms"], [by_machine[record["machine_name"]] for record in expected.values()])
     if replacement:
-        write_replacement(output, selected[0], masters, expected)
+        replacement_machine = find_replacement(masters, expected, output)
+    current_machines = [by_machine[record["machine_name"]] for record in expected.values()]
+    if replacement_machine:
+        current_machines.append(replacement_machine)
+    check_cpms(oc, kubeconfig, inventory["machine_api"]["namespace"], inventory["cpms"], current_machines)
+    if replacement:
+        if replacement_machine is None:
+            fail("replacement Machine identity is absent")
+        write_replacement(output, selected[0], replacement_machine)
     else:
         for peer in selected:
             (output / f"{peer['inventory_hostname']}.machine.json").write_text(json.dumps(by_machine[peer["machine_name"]], sort_keys=True), encoding="utf-8")

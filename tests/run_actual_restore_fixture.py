@@ -48,7 +48,7 @@ def build_fixture(scenario: str) -> tuple[pathlib.Path, pathlib.Path, pathlib.Pa
         peers = []
         for number in (1, 2):
             peers.append({"inventory_hostname": f"cp{number}", "ssh_host_identity": f"host-{number}", "node_name": f"node-{number}", "node_uid": f"node-uid-{number}", "provider_id": f"provider-{number}", "machine_name": f"machine-{number}", "machine_uid": f"machine-uid-{number}", "machine_node_ref_name": f"node-{number}", "machine_node_ref_uid": f"node-uid-{number}", "machine_provider_id": f"provider-{number}"})
-        inventory = {"schema_version": 1, "capture": {"backup_set_id": SET_ID, "pair_payload_sha256": digest, "cluster_id": "fixture", "ocp_version": selected_version, "ssh_host_identity_command": identity_command}, "machine_api": {"api_version": "machine.openshift.io/v1beta1", "namespace": "openshift-machine-api"}, "control_plane": {"replicas": 3, "recovery_host": {"inventory_hostname": "cp0", "ssh_host_identity": "host-0", "node_name": "node-0", "node_uid": "node-uid-0", "provider_id": "provider-0", "machine_name": "machine-0", "machine_uid": "machine-uid-0", "machine_node_ref_name": "node-0", "machine_node_ref_uid": "node-uid-0", "machine_provider_id": "provider-0"}, "non_recovery": peers}, "cpms": {"required": False, "observed_absent": True}}
+        inventory = {"schema_version": 1, "capture": {"backup_set_id": SET_ID, "pair_payload_sha256": digest, "cluster_id": "fixture", "ocp_version": selected_version, "ssh_host_identity_command": identity_command}, "machine_api": {"api_version": "machine.openshift.io/v1beta1", "namespace": "openshift-machine-api"}, "control_plane": {"replicas": 3, "recovery_host": {"inventory_hostname": "cp0", "ssh_host_identity": "host-0", "node_name": "node-0", "node_uid": "node-uid-0", "provider_id": "provider-0", "machine_name": "machine-0", "machine_uid": "machine-uid-0", "machine_node_ref_name": "node-0", "machine_node_ref_uid": "node-uid-0", "machine_provider_id": "provider-0"}, "non_recovery": peers}, "cpms": {"required": scenario == "replacement-unowned", "observed_absent": scenario != "replacement-unowned", "api_version": "machine.openshift.io/v1", "replicas": 3, "state": "Active", "name": "cluster", "uid": "cpms-uid", "controller_uid": "cpms-controller-uid", "controller_kind": "ControlPlaneMachineSet"}}
         if scenario == "duplicate-inventory":
             inventory["control_plane"]["non_recovery"][1]["node_uid"] = "node-uid-1"
             inventory["control_plane"]["non_recovery"][1]["machine_node_ref_uid"] = "node-uid-1"
@@ -73,37 +73,53 @@ def build_fixture(scenario: str) -> tuple[pathlib.Path, pathlib.Path, pathlib.Pa
     script(bin_dir / "restore", f'#!/bin/sh\nprintf "vendor-restore\n" >> "{trace}"\n')
     script(bin_dir / "disable", disable_body)
     script(bin_dir / "oc", f'''#!/usr/bin/env python3
-import json, pathlib, sys
+import http.server, json, pathlib, sys
 scenario = {scenario!r}
 args = sys.argv[1:]
 with open("{trace}", "a") as trace_file: trace_file.write("oc:" + " ".join(args) + "\\n")
 deleted = pathlib.Path("{fixture / 'deleted'}")
-removed = deleted.read_text().split(",") if deleted.exists() else []
-if "delete" in args:
-    peer = "2" if "cp2.machine.json" in " ".join(args) else "1"
-    deleted.write_text(",".join([*removed, peer]))
-    sys.exit(0)
+def removed(): return deleted.read_text().split(",") if deleted.exists() and deleted.read_text() else []
 def machine(n, replacement=False):
     prefix = "replacement-" if replacement else ""
-    return {{"metadata": {{"name": f"{{prefix}}machine-{{n}}", "uid": f"{{prefix}}machine-uid-{{n}}", "labels": {{"machine.openshift.io/cluster-api-machine-role": "master"}}}}, "status": {{"nodeRef": {{"name": f"{{prefix}}node-{{n}}", "uid": f"{{prefix}}node-uid-{{n}}"}}}}, "spec": {{"providerID": f"{{prefix}}provider-{{n}}"}}}}
+    owners = [] if scenario == "replacement-unowned" and replacement else [{{"uid":"cpms-controller-uid","kind":"ControlPlaneMachineSet","controller":True}}] if scenario == "replacement-unowned" else []
+    return {{"metadata": {{"name": f"{{prefix}}machine-{{n}}", "uid": f"{{prefix}}machine-uid-{{n}}", "labels": {{"machine.openshift.io/cluster-api-machine-role": "master"}}, "ownerReferences": owners}}, "status": {{"nodeRef": {{"name": f"{{prefix}}node-{{n}}", "uid": f"{{prefix}}node-uid-{{n}}"}}}}, "spec": {{"providerID": f"{{prefix}}provider-{{n}}"}}}}
 def node(n, replacement=False):
     prefix = "replacement-" if replacement else ""
     return {{"metadata": {{"name": f"{{prefix}}node-{{n}}", "uid": f"{{prefix}}node-uid-{{n}}"}}, "spec": {{"providerID": f"{{prefix}}provider-{{n}}"}}}}
+if "proxy" in args:
+    port = int(next(arg.split("=", 1)[1] for arg in args if arg.startswith("--port=")))
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def log_message(self, *unused): pass
+        def do_DELETE(self):
+            body = self.rfile.read(int(self.headers.get("Content-Length", "0")))
+            expected_name = self.path.rsplit("/", 1)[-1]
+            expected_uid = ("machine-uid-2" if expected_name == "machine-2" else "machine-uid-1").encode()
+            exact = body == b'{{"apiVersion":"v1","kind":"DeleteOptions","preconditions":{{"uid":"' + expected_uid + b'"}}}}'
+            with open("{trace}", "a") as trace_file: trace_file.write("delete-api:" + expected_name + ":" + body.decode() + "\\n")
+            if scenario == "name-reuse-conflict" or not exact:
+                self.send_response(409); self.end_headers(); return
+            peer = "2" if expected_name == "machine-2" else "1"
+            deleted.write_text(",".join([*removed(), peer]))
+            self.send_response(200); self.end_headers()
+    http.server.HTTPServer(("127.0.0.1", port), Handler).serve_forever()
 if "get" in args:
     target = args[args.index("get") + 1]
+    current_removed = removed()
     if target == "machines":
-        items = [machine(n) for n in (0, 1, 2) if str(n) not in removed]
-        if scenario != "replacement-absent": items += [machine(n, True) for n in removed]
+        items = [machine(n) for n in (0, 1, 2) if str(n) not in current_removed]
+        if scenario != "replacement-absent": items += [machine(n, True) for n in current_removed]
         if scenario == "extra-master": items.append(machine(9))
         print(json.dumps({{"items": items}}))
     elif target == "nodes":
         items = [node(n) for n in (0, 1, 2)]
-        if scenario != "replacement-absent": items += [node(n, True) for n in removed]
+        if scenario != "replacement-absent": items += [node(n, True) for n in current_removed]
         if scenario == "recovery-mismatch": items[0]["metadata"]["uid"] = "wrong-recovery-uid"
         print(json.dumps({{"items": items}}))
     elif target == "clusteroperators":
-        status, degraded = ("False", "True") if scenario == "unhealthy-operator" and not removed else ("True", "False")
+        status, degraded = ("False", "True") if scenario == "unhealthy-operator" and not current_removed else ("True", "False")
         print(json.dumps({{"items":[{{"metadata":{{"name":n}},"status":{{"conditions":[{{"type":"Available","status":status}},{{"type":"Degraded","status":degraded}}]}}}} for n in ("etcd","kube-apiserver","machine-api")]}}))
+    elif target == "controlplanemachineset.machine.openshift.io":
+        print(json.dumps({{"apiVersion":"machine.openshift.io/v1","metadata":{{"uid":"cpms-uid"}},"spec":{{"replicas":3,"state":"Active"}}}}))
     else: print(json.dumps({{"items": []}}))
 ''')
     identity_body = '#!/bin/sh\nprintf "host-%s\\n" "${1#cp}"\n'
@@ -178,9 +194,11 @@ def run(scenario: str) -> None:
             if scenario == "ha":
                 require(lines.count("fence") == 3, lines)
                 require(max(i for i, line in enumerate(lines) if line == "fence") < lines.index("vendor-restore"), lines)
-                first, second = (next(i for i, line in enumerate(lines) if f"cp{n}.machine.json" in line) for n in (1, 2))
+                first, second = (next(i for i, line in enumerate(lines) if line.startswith(f"delete-api:machine-{n}:")) for n in (1, 2))
                 require(any("wait-for-stable-cluster" in line for line in lines[first + 1:second]), lines)
                 require(any("get machines" in line for line in lines[first + 1:second]), lines)
+                for n in (1, 2):
+                    require(any(line == f'delete-api:machine-{n}:{{"apiVersion":"v1","kind":"DeleteOptions","preconditions":{{"uid":"machine-uid-{n}"}}}}' for line in lines), lines)
             else:
                 require("fence" not in lines, lines)
             require(json.loads(state_file.read_text())["phase"] == "VERIFIED", state_file.read_text())
@@ -213,10 +231,16 @@ def run(scenario: str) -> None:
             require(result.returncode != 0 and "POST_API_MAP_RECONCILIATION_FAILED" in output, output)
             require(not any(" delete " in line for line in lines), lines)
             require(json.loads(state_file.read_text())["phase"] == "POST_API_MAP_RECONCILIATION_FAILED", state_file.read_text())
-        elif scenario == "replacement-absent":
+        elif scenario in {"replacement-absent", "replacement-unowned"}:
             require(result.returncode != 0 and "HA_MACHINE_RECOVERY_INCOMPLETE" in output, output)
-            deletes = [line for line in lines if " delete " in line]
-            require(len(deletes) == 1 and "cp1.machine.json" in deletes[0], deletes)
+            deletes = [line for line in lines if line.startswith("delete-api:")]
+            require(len(deletes) == 1 and deletes[0].startswith("delete-api:machine-1:"), deletes)
+            require(json.loads(state_file.read_text())["phase"] == "HA_MACHINE_RECOVERY_INCOMPLETE", state_file.read_text())
+        elif scenario == "name-reuse-conflict":
+            require(result.returncode != 0 and "HA_MACHINE_RECOVERY_INCOMPLETE" in output, output)
+            deletes = [line for line in lines if line.startswith("delete-api:")]
+            require(len(deletes) == 1 and deletes[0] == 'delete-api:machine-1:{"apiVersion":"v1","kind":"DeleteOptions","preconditions":{"uid":"machine-uid-1"}}', deletes)
+            require(not (fixture / "deleted").exists(), lines)
             require(json.loads(state_file.read_text())["phase"] == "HA_MACHINE_RECOVERY_INCOMPLETE", state_file.read_text())
         elif scenario == "duplicate-inventory":
             require(result.returncode != 0 and "duplicate HA Node UID" in output, output)
@@ -234,5 +258,5 @@ def run(scenario: str) -> None:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("scenario", choices=["ha", "sno", "missing-oc", "fence-fail", "container", "rerun", "check", "mixed-patch", "unknown-minor", "selected-mismatch", "identity-mismatch", "recovery-mismatch", "extra-master", "unhealthy-operator", "replacement-absent", "duplicate-inventory"])
+    parser.add_argument("scenario", choices=["ha", "sno", "missing-oc", "fence-fail", "container", "rerun", "check", "mixed-patch", "unknown-minor", "selected-mismatch", "identity-mismatch", "recovery-mismatch", "extra-master", "unhealthy-operator", "replacement-absent", "replacement-unowned", "name-reuse-conflict", "duplicate-inventory"])
     run(parser.parse_args().scenario)
