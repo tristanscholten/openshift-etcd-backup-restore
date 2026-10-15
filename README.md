@@ -49,6 +49,7 @@ ansible-playbook -i inventory/hosts.yml playbooks/uninstall.yml \
 
 ```sh
 python3 -m unittest discover -s tests -v
+tests/test_disposable_etcd_podman.sh
 ansible-playbook --syntax-check -i inventory/hosts.yml playbooks/backup-install.yml
 ansible-playbook --syntax-check -i inventory/hosts.yml playbooks/restore.yml
 ```

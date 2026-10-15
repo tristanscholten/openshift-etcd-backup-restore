@@ -18,6 +18,16 @@
     post_api_kubeconfig: ''
     ha_machine_map: {}
     ocp_version_command: /usr/bin/rpm -q --qf %{VERSION} openshift-clients
+    restore_validator_path: /usr/local/libexec/ocp-etcd-validate-backup
+    restore_vendor_restore_script: /usr/local/bin/cluster-restore.sh
+    restore_vendor_disable_script: /usr/local/bin/disable-etcd.sh
+    restore_crictl_path: /usr/bin/crictl
+    restore_oc_path: oc
+    restore_min_free_kb: 1048576
+    restore_min_certificate_age_seconds: 86400
+    restore_etcd_cert_path: /etc/kubernetes/static-pod-resources/etcd-certs
+    restore_etcd_manifest_path: /etc/kubernetes/manifests/etcd-pod.yaml
+    backup_service_name: ocp-etcd-backup
   pre_tasks:
     - name: Validate topology and explicit HA mapping before mutation
       ansible.builtin.assert:
@@ -41,6 +51,26 @@
         fail_msg: 'Exact destructive confirmation required.'
       when: restore_mode == 'apply'
       run_once: true
+    - name: Inspect controller kubeconfig before HA mutation
+      ansible.builtin.stat:
+        path: '{{ post_api_kubeconfig }}'
+      delegate_to: localhost
+      become: false
+      run_once: true
+      register: restore_kubeconfig_stat
+      when: restore_topology == 'ha'
+    - name: Require readable regular controller kubeconfig before HA mutation
+      ansible.builtin.assert:
+        that:
+          - restore_kubeconfig_stat.stat.exists
+          - restore_kubeconfig_stat.stat.isreg
+          - not restore_kubeconfig_stat.stat.islnk
+          - restore_kubeconfig_stat.stat.readable
+        fail_msg: 'HA requires an existing readable regular certificate kubeconfig on the controller; no mutation occurred.'
+      delegate_to: localhost
+      become: false
+      run_once: true
+      when: restore_topology == 'ha'
     - name: Detect each installed version without API access
       ansible.builtin.command:
         cmd: '{{ ocp_version_command }}'
@@ -55,7 +85,7 @@
         fail_msg: 'Installed versions must be equal OCP 4.20.z on every control-plane host.'
     - name: Validate source set once
       ansible.builtin.command:
-        argv: [/usr/local/libexec/ocp-etcd-validate-backup, '{{ backup_root }}', '{{ restore_selection }}']
+        argv: ['{{ restore_validator_path }}', '{{ backup_root }}', '{{ restore_selection }}']
       changed_when: false
       check_mode: false
       register: restore_source_metadata
@@ -68,16 +98,47 @@
           - (restore_source_metadata.stdout | from_json).ocp_version == hostvars[groups['control_plane'][0]].restore_installed_version.stdout | trim
         fail_msg: 'Selected set does not match cluster identity and installed exact z-stream.'
       run_once: true
-    - name: Require vendor scripts on every host
+    - name: Require vendor, runtime, and static-pod prerequisites on every host
       ansible.builtin.stat:
         path: '{{ item }}'
-      loop: [/usr/local/bin/cluster-restore.sh, /usr/local/bin/disable-etcd.sh]
+      loop:
+        - '{{ restore_vendor_restore_script }}'
+        - '{{ restore_vendor_disable_script }}'
+        - '{{ restore_crictl_path }}'
+        - '{{ restore_etcd_manifest_path }}'
+        - '{{ restore_etcd_cert_path }}'
       register: restore_vendor_paths
-    - name: Assert vendor scripts are executable
+    - name: Assert vendor, runtime, and static-pod prerequisites are safe
       ansible.builtin.assert:
-        that: item.stat.exists and item.stat.isreg and item.stat.executable
-        fail_msg: 'Required installed vendor script is unavailable.'
+        that: item.stat.exists and not item.stat.islnk and (item.stat.isdir or (item.stat.isreg and item.stat.executable))
+        fail_msg: 'Required installed vendor, runtime, certificate, or static-pod prerequisite is unavailable.'
       loop: '{{ restore_vendor_paths.results }}'
+    - name: Measure free root filesystem space without mutation
+      ansible.builtin.command:
+        argv: [/usr/bin/df, -Pk, /]
+      changed_when: false
+      check_mode: false
+      register: restore_root_disk
+    - name: Require minimum free root filesystem space
+      ansible.builtin.assert:
+        that: (restore_root_disk.stdout_lines[-1].split()[3] | int) >= (restore_min_free_kb | int)
+        fail_msg: 'Insufficient free root filesystem space for a fail-closed restore.'
+    - name: Inspect certificate material age without mutation
+      ansible.builtin.stat:
+        path: '{{ restore_etcd_cert_path }}'
+      register: restore_cert_stat
+    - name: Require certificate material older than initial rotation window
+      ansible.builtin.assert:
+        that: (lookup('pipe', 'date +%s') | int) - (restore_cert_stat.stat.mtime | int) >= (restore_min_certificate_age_seconds | int)
+        fail_msg: 'Certificate material is younger than the configured rotation window; no mutation occurred.'
+    - name: Require safe absolute managed backup and recovery paths
+      ansible.builtin.assert:
+        that:
+          - backup_root is match('^/home/core/[^.].*$')
+          - restore_state_dir is match('^/var/lib/ocp-etcd-restore(/.*)?$')
+          - "'..' not in backup_root"
+          - "'..' not in restore_state_dir"
+        fail_msg: 'Backup or recovery path is outside its protected managed prefix.'
     - name: Detect prior destructive checkpoint
       ansible.builtin.stat:
         path: '{{ restore_controller_state_dir }}/{{ restore_selection }}.json'
@@ -163,7 +224,7 @@
       when: inventory_hostname == recovery_host
     - name: Verify copied source set hash gate
       ansible.builtin.command:
-        argv: [/usr/local/libexec/ocp-etcd-validate-backup, '{{ restore_state_dir }}', '{{ restore_selection }}']
+        argv: ['{{ restore_validator_path }}', '{{ restore_state_dir }}', '{{ restore_selection }}']
       changed_when: false
       when: inventory_hostname == recovery_host
     - name: Write immutable-copy checkpoint
@@ -176,12 +237,12 @@
       run_once: true
     - name: Fence every HA peer with vendor command
       ansible.builtin.command:
-        argv: [/usr/local/bin/disable-etcd.sh]
+        argv: ['{{ restore_vendor_disable_script }}']
       changed_when: true
       when: restore_topology == 'ha'
     - name: Bounded wait for every HA etcd container to disappear
       ansible.builtin.command:
-        argv: [/usr/bin/crictl, ps, --name, etcd, -q]
+        argv: ['{{ restore_crictl_path }}', ps, --name, etcd, -q]
       changed_when: false
       register: restore_etcd_fence
       retries: 30
@@ -198,7 +259,7 @@
       run_once: true
     - name: Invoke vendor restore once on recovery host
       ansible.builtin.command:
-        argv: [/usr/local/bin/cluster-restore.sh, '{{ restore_state_dir }}/{{ restore_selection }}']
+        argv: ['{{ restore_vendor_restore_script }}', '{{ restore_state_dir }}/{{ restore_selection }}']
       changed_when: true
       when: inventory_hostname == recovery_host
     - name: Write vendor restore checkpoint
@@ -211,7 +272,7 @@
       run_once: true
     - name: Wait for API only after vendor restore
       ansible.builtin.command:
-        argv: [oc, '--kubeconfig={{ post_api_kubeconfig }}', version]
+        argv: ['{{ restore_oc_path }}', '--kubeconfig={{ post_api_kubeconfig }}', version]
       changed_when: false
       register: restore_api_ready
       retries: 60
@@ -223,7 +284,7 @@
       when: restore_topology == 'ha'
     - name: Enable temporary quorum guard after API recovery
       ansible.builtin.command:
-        argv: [oc, '--kubeconfig={{ post_api_kubeconfig }}', patch, etcd, cluster, --type=merge, '--patch={"spec":{"unsupportedConfigOverrides":{"useUnsupportedUnsafeNonHANonProductionUnstableEtcd":true}}}']
+        argv: ['{{ restore_oc_path }}', '--kubeconfig={{ post_api_kubeconfig }}', patch, etcd, cluster, --type=merge, '--patch={"spec":{"unsupportedConfigOverrides":{"useUnsupportedUnsafeNonHANonProductionUnstableEtcd":true}}}']
       changed_when: true
       delegate_to: localhost
       become: false
@@ -239,15 +300,44 @@
       run_once: true
     - name: Clear temporary quorum guard
       ansible.builtin.command:
-        argv: [oc, '--kubeconfig={{ post_api_kubeconfig }}', patch, etcd, cluster, --type=json, '--patch=[{"op":"remove","path":"/spec/unsupportedConfigOverrides/useUnsupportedUnsafeNonHANonProductionUnstableEtcd"}]']
+        argv: ['{{ restore_oc_path }}', '--kubeconfig={{ post_api_kubeconfig }}', patch, etcd, cluster, --type=json, '--patch=[{"op":"remove","path":"/spec/unsupportedConfigOverrides/useUnsupportedUnsafeNonHANonProductionUnstableEtcd"}]']
       changed_when: true
       delegate_to: localhost
       become: false
       run_once: true
       when: restore_topology == 'ha'
+    - name: Verify etcd and control-plane operators after API recovery
+      ansible.builtin.command:
+        argv: ['{{ restore_oc_path }}', '--kubeconfig={{ post_api_kubeconfig }}', get, clusteroperators, etcd, kube-apiserver]
+      changed_when: false
+      delegate_to: localhost
+      become: false
+      run_once: true
+      when: restore_topology == 'ha'
+    - name: Verify documented cluster stability after HA recovery
+      ansible.builtin.command:
+        argv: ['{{ restore_oc_path }}', '--kubeconfig={{ post_api_kubeconfig }}', adm, wait-for-stable-cluster, '--minimum-stable-period=5m']
+      changed_when: false
+      delegate_to: localhost
+      become: false
+      run_once: true
+      when: restore_topology == 'ha'
+    - name: Take fresh backup before enabling its source timer
+      ansible.builtin.systemd_service:
+        name: '{{ backup_service_name }}.service'
+        state: started
+      delegate_to: '{{ backup_source_hostname }}'
+      run_once: true
+    - name: Enable source backup timer only after health and fresh backup
+      ansible.builtin.systemd_service:
+        name: '{{ backup_service_name }}.timer'
+        enabled: true
+        state: started
+      delegate_to: '{{ backup_source_hostname }}'
+      run_once: true
     - name: Write verified checkpoint
       ansible.builtin.copy:
-        content: '{"phase":"VERIFIED","set_id":"{{ restore_selection }}","next_safe_action":"take a fresh backup before enabling timer"}'
+        content: '{"phase":"VERIFIED","set_id":"{{ restore_selection }}","next_safe_action":"monitor the re-enabled source timer and retain checkpoint evidence"}'
         dest: '{{ restore_controller_state_dir }}/{{ restore_selection }}.json'
         mode: '0600'
       delegate_to: localhost

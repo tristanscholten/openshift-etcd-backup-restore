@@ -166,6 +166,28 @@ class RestoreContractTests(unittest.TestCase):
         self.assertIn('Unsupported topology, exact non-recovery Machine mapping', result.stdout + result.stderr)
         self.assertNotIn('Stop backup timers on all hosts', result.stdout + result.stderr)
 
+    def test_actual_ansible_missing_kubeconfig_stops_before_mutation(self):
+        inventory = ROOT / 'tests' / 'fixture-missing-kubeconfig-ha.yml'
+        inventory.write_text('''all:\n  children:\n    control_plane:\n      hosts:\n        cp0: {ansible_connection: local}\n        cp1: {ansible_connection: local}\n        cp2: {ansible_connection: local}\n''')
+        missing_kubeconfig = ROOT / 'tests' / 'does-not-exist.kubeconfig'
+        try:
+            result = subprocess.run([
+                'ansible-playbook', '-i', str(inventory), str(RESTORE),
+                '-e', 'ansible_become=false',
+                '-e', 'restore_mode=apply', '-e', 'restore_selection=set-20261015T000000Z',
+                '-e', 'expected_cluster_id=fixture', '-e', 'destructive_confirm=RESTORE_fixture',
+                '-e', 'backup_source_hostname=cp0', '-e', 'recovery_host=cp0', '-e', 'restore_topology=ha',
+                '-e', f'post_api_kubeconfig={missing_kubeconfig}',
+                '-e', '{"ha_machine_map":{"cp1":"machine-1","cp2":"machine-2"}}',
+            ], text=True, capture_output=True)
+        finally:
+            inventory.unlink(missing_ok=True)
+        output = result.stdout + result.stderr
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('HA requires an existing readable regular certificate kubeconfig', output)
+        self.assertNotIn('Stop backup timers on all hosts', output)
+        self.assertNotIn('Fence every HA peer with vendor command', output)
+
     def test_playbooks_have_executable_guardrail_shapes(self):
         restore, listing, uninstall, peer = (p.read_text() for p in (RESTORE, LIST, UNINSTALL, HA_PEER))
         self.assertIn('ha_machine_map.keys()', restore)

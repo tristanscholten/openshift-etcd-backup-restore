@@ -3,14 +3,14 @@
   block:
     - name: Delete mapped Machine
       ansible.builtin.command:
-        argv: [oc, '--kubeconfig={{ post_api_kubeconfig }}', delete, machine, '--namespace=openshift-machine-api', '{{ ha_peer.value }}']
+        argv: ['{{ restore_oc_path }}', '--kubeconfig={{ post_api_kubeconfig }}', delete, machine, '--namespace=openshift-machine-api', '{{ ha_peer.value }}']
       changed_when: true
       delegate_to: localhost
       become: false
 
     - name: Wait for documented cluster stability before next Machine
       ansible.builtin.command:
-        argv: [oc, '--kubeconfig={{ post_api_kubeconfig }}', adm, wait-for-stable-cluster, '--minimum-stable-period=5m']
+        argv: ['{{ restore_oc_path }}', '--kubeconfig={{ post_api_kubeconfig }}', adm, wait-for-stable-cluster, '--minimum-stable-period=5m']
       changed_when: false
       delegate_to: localhost
       become: false
