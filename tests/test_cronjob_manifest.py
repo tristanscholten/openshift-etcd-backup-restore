@@ -72,6 +72,9 @@ class CronJobManifestTests(unittest.TestCase):
         pod = cronjob['jobTemplate']['spec']['template']['spec']
         self.assertEqual(pod['nodeSelector']['kubernetes.io/hostname'], 'REPLACE_WITH_ONE_CONTROL_PLANE_HOSTNAME')
         self.assertFalse(pod['automountServiceAccountToken'])
+        self.assertTrue(pod['hostNetwork'])
+        self.assertNotIn('hostPID', pod)
+        self.assertNotIn('hostIPC', pod)
         container = pod['containers'][0]
         self.assertTrue(container['securityContext']['privileged'])
         self.assertEqual(container['volumeMounts'][0]['mountPath'], '/host')

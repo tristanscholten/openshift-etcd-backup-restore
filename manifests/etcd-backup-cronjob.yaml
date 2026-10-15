@@ -60,6 +60,9 @@ spec:
         spec:
           serviceAccountName: etcd-backup
           automountServiceAccountToken: false
+          # The chrooted vendor script uses the host kubeconfig and host etcd
+          # endpoint. Host networking supplies that runtime context.
+          hostNetwork: true
           restartPolicy: Never
           nodeSelector:
             # REQUIRED: replace with exactly one selected control-plane hostname.
