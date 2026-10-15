@@ -1,0 +1,46 @@
+---
+- name: Remove one OCP etcd backup schedule without deleting backups
+  hosts: control_plane
+  become: true
+  gather_facts: false
+  vars:
+    backup_source_hostname: ''
+    backup_service_name: ocp-etcd-backup
+    backup_uninstall_confirm: false
+  pre_tasks:
+    - name: Require nominated source and explicit uninstall confirmation
+      ansible.builtin.assert:
+        that:
+          - backup_source_hostname in groups['control_plane']
+          - backup_uninstall_confirm | bool
+        fail_msg: 'Set backup_source_hostname and -e backup_uninstall_confirm=true; retained backups are never removed.'
+      run_once: true
+  tasks:
+    - name: End before mutation in check mode
+      ansible.builtin.meta: end_play
+      when: ansible_check_mode
+
+    - name: Stop and disable backup timer on nominated source
+      ansible.builtin.systemd_service:
+        name: '{{ backup_service_name }}.timer'
+        enabled: false
+        state: stopped
+      when: inventory_hostname == backup_source_hostname
+
+    - name: Remove managed timer, service, runner, and validator only
+      ansible.builtin.file:
+        path: '{{ item }}'
+        state: absent
+      loop:
+        - '/etc/systemd/system/{{ backup_service_name }}.timer'
+        - '/etc/systemd/system/{{ backup_service_name }}.service'
+        - /etc/ocp-etcd-backup.conf
+        - /usr/local/sbin/ocp-etcd-backup-runner
+        - /usr/local/libexec/ocp-etcd-validate-backup
+      when: inventory_hostname == backup_source_hostname
+      notify: Reload systemd
+
+  handlers:
+    - name: Reload systemd
+      ansible.builtin.systemd_service:
+        daemon_reload: true

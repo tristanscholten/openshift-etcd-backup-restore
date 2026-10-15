@@ -1,0 +1,10 @@
+---
+# `run_once` is intentional: these controller/source/recovery transitions must occur exactly once.
+# Role defaults retain the public CLI variable names documented by the operator runbook.
+skip_list:
+  - run-once
+  - var-naming
+  - yaml[line-length]
+exclude_paths:
+  - bootstrap/
+  - repo/

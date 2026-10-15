@@ -1,0 +1,103 @@
+---
+- name: Refuse unsafe backup installation
+  ansible.builtin.assert:
+    that:
+      - backup_install_confirm | bool
+      - backup_source_hostname | length > 0
+      - inventory_hostname == backup_source_hostname
+      - backup_ocp_version is match('^4\\.20\\.[0-9]+$')
+      - backup_cluster_id | length > 0
+      - backup_restore_topology in ['sno', 'ha']
+      - backup_restore_topology != 'ha' or backup_capture_kubeconfig is match('^/[^ ]+$')
+      - backup_restore_topology != 'ha' or backup_ha_capture_config is mapping
+      - backup_restore_topology != 'ha' or (backup_ha_capture_config.ssh_host_identity_command | default('')) is match('^/\\S+$')
+      - backup_root is match('^' ~ (backup_user_home | regex_escape) ~ '/[^.][A-Za-z0-9._/-]*$')
+      - "'..' not in backup_root.split('/')"
+    fail_msg: >-
+      Installation is limited to the nominated source under its configured home and
+      requires -e backup_install_confirm=true.
+
+- name: Require installed vendor backup script
+  ansible.builtin.stat:
+    path: "{{ backup_vendor_script }}"
+  register: vendor_backup_script
+
+- name: Fail if vendor backup script is absent
+  ansible.builtin.assert:
+    that:
+      - vendor_backup_script.stat.exists
+      - vendor_backup_script.stat.isreg
+      - vendor_backup_script.stat.executable
+
+- name: Create managed backup directory
+  ansible.builtin.file:
+    path: "{{ backup_root }}"
+    state: directory
+    owner: root
+    group: root
+    mode: '0700'
+
+- name: Install fail-closed backup runner
+  ansible.builtin.copy:
+    src: ocp-etcd-backup-runner
+    dest: /usr/local/sbin/ocp-etcd-backup-runner
+    owner: root
+    group: root
+    mode: '0700'
+
+- name: Install read-only backup validator
+  ansible.builtin.copy:
+    src: validate_backup.py
+    dest: /usr/local/libexec/ocp-etcd-validate-backup
+    owner: root
+    group: root
+    mode: '0700'
+
+- name: Install healthy-cluster HA identity capture helper
+  ansible.builtin.copy:
+    src: capture_machine_recovery_inventory.py
+    dest: /usr/local/libexec/ocp-etcd-capture-machine-recovery-inventory
+    owner: root
+    group: root
+    mode: '0700'
+
+- name: Install root-only HA capture configuration
+  ansible.builtin.copy:
+    content: '{{ backup_ha_capture_config | to_json }}\n'
+    dest: /etc/ocp-etcd-backup-ha-capture.json
+    owner: root
+    group: root
+    mode: '0600'
+  no_log: true
+
+- name: Install root-only backup runtime configuration
+  ansible.builtin.template:
+    src: ocp-etcd-backup.env.j2
+    dest: '{{ backup_environment_file }}'
+    owner: root
+    group: root
+    mode: '0600'
+  no_log: true
+
+- name: Install backup service unit
+  ansible.builtin.template:
+    src: ocp-etcd-backup.service.j2
+    dest: "/etc/systemd/system/{{ backup_service_name }}.service"
+    owner: root
+    group: root
+    mode: '0644'
+
+- name: Install backup timer unit
+  ansible.builtin.template:
+    src: ocp-etcd-backup.timer.j2
+    dest: "/etc/systemd/system/{{ backup_service_name }}.timer"
+    owner: root
+    group: root
+    mode: '0644'
+
+- name: Enable nominated source timer
+  ansible.builtin.systemd_service:
+    name: "{{ backup_service_name }}.timer"
+    enabled: true
+    state: started
+    daemon_reload: true
