@@ -1,0 +1,10 @@
+---
+- name: Install one OCP etcd backup schedule
+  hosts: control_plane
+  become: true
+  gather_facts: true
+  tasks:
+    - name: Apply backup role only on nominated source
+      ansible.builtin.include_role:
+        name: etcd_backup
+      when: inventory_hostname == backup_source_hostname
