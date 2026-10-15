@@ -83,69 +83,8 @@ class BackupHarnessTests(unittest.TestCase):
         self.assertNotEqual(subprocess.run([str(self.validator), str(self.root), valid.name], capture_output=True).returncode, 0)
 
 
-class SimulatedHARestore:
-    """SIMULATED command/SSH trace fixture; it never invokes OCP or real SSH."""
-
-    def __init__(self, hosts=('cp0', 'cp1', 'cp2'), recovery='cp0', source='cp1'):
-        self.hosts, self.recovery, self.source = hosts, recovery, source
-        self.trace, self.phase = [], None
-
-    def apply(self, machine_map, versions=('4.20.3',) * 3, selected='4.20.3', bad_hash=False, fence_failure=None, api=True, check=False, rerun=False):
-        peers = sorted(set(self.hosts) - {self.recovery})
-        if check:
-            self.trace.append('check-mode-end'); return False
-        if rerun:
-            self.trace.append('rerun-refused'); return False
-        if not all(v == '4.20.3' for v in versions) or selected != versions[0]:
-            self.trace.append('version-rejected'); return False
-        if sorted(machine_map) != peers or any(not isinstance(v, str) or not v.strip() for v in machine_map.values()):
-            self.trace.append('mapping-rejected'); return False
-        self.trace += [f'fetch:{self.source}', f'hash:{self.recovery}']
-        if bad_hash:
-            self.phase = 'RECOVERY_COPY_FAILED'; return False
-        self.phase = 'RECOVERY_COPY_READY'
-        for host in self.hosts:
-            self.trace.append(f'fence:{host}')
-            if host == fence_failure:
-                self.phase = 'FENCING_INCOMPLETE'; return False
-        self.phase = 'FENCED'; self.trace.append(f'vendor-restore:{self.recovery}')
-        if not api:
-            self.phase = 'VENDOR_RESTORE_STARTED'; return False
-        self.trace += ['oc:api-ready', 'oc:quorum-guard']
-        for peer in peers:
-            self.trace += [f'oc:delete:{machine_map[peer]}', f'oc:stable:{peer}']
-        self.trace += ['oc:clear-guard']; self.phase = 'VERIFIED'; return True
-
-
 class RestoreContractTests(unittest.TestCase):
     """SIMULATED multi-host restore execution; no cluster is contacted."""
-
-    def test_source_copy_hash_then_all_fences_then_one_restore(self):
-        flow = SimulatedHARestore(); self.assertTrue(flow.apply({'cp1': 'machine-1', 'cp2': 'machine-2'}))
-        self.assertLess(flow.trace.index('hash:cp0'), flow.trace.index('fence:cp0'))
-        restore = [x for x in flow.trace if x.startswith('vendor-restore:')]
-        self.assertEqual(restore, ['vendor-restore:cp0'])
-        self.assertLess(max(flow.trace.index(f'fence:{h}') for h in flow.hosts), flow.trace.index('vendor-restore:cp0'))
-
-    def test_wrong_mapping_rejects_before_timer_fence_or_oc(self):
-        flow = SimulatedHARestore(); self.assertFalse(flow.apply({'unrelated-a': 'machine-a', 'unrelated-b': 'machine-b'}))
-        self.assertEqual(flow.trace, ['mapping-rejected'])
-
-    def test_version_mismatch_and_unknown_minor_reject_before_mutation(self):
-        for versions, selected in [(('4.20.3', '4.20.4', '4.20.3'), '4.20.3'), (('4.21.1',) * 3, '4.21.1'), (('4.20.3',) * 3, '4.20.2')]:
-            flow = SimulatedHARestore(); self.assertFalse(flow.apply({'cp1': 'm1', 'cp2': 'm2'}, versions, selected)); self.assertEqual(flow.trace, ['version-rejected'])
-
-    def test_peer_error_stops_safely_and_rerun_and_check_are_nonmutating(self):
-        flow = SimulatedHARestore(); self.assertFalse(flow.apply({'cp1': 'm1', 'cp2': 'm2'}, fence_failure='cp1'))
-        self.assertEqual(flow.phase, 'FENCING_INCOMPLETE'); self.assertNotIn('vendor-restore:cp0', flow.trace)
-        self.assertEqual(SimulatedHARestore().apply({'cp1': 'm1', 'cp2': 'm2'}, rerun=True), False)
-        self.assertEqual(SimulatedHARestore().apply({'cp1': 'm1', 'cp2': 'm2'}, check=True), False)
-
-    def test_per_machine_stability_precedes_next_delete_and_oc_is_post_api(self):
-        flow = SimulatedHARestore(); self.assertTrue(flow.apply({'cp1': 'm1', 'cp2': 'm2'}))
-        self.assertLess(flow.trace.index('oc:api-ready'), flow.trace.index('oc:quorum-guard'))
-        self.assertLess(flow.trace.index('oc:delete:m1'), flow.trace.index('oc:stable:cp1'))
-        self.assertLess(flow.trace.index('oc:stable:cp1'), flow.trace.index('oc:delete:m2'))
 
     def test_actual_ansible_wrong_mapping_stops_before_mutation(self):
         inventory = ROOT / 'tests' / 'fixture-invalid-ha.yml'
@@ -184,7 +123,7 @@ class RestoreContractTests(unittest.TestCase):
             inventory.unlink(missing_ok=True)
         output = result.stdout + result.stderr
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn('HA requires an existing readable regular certificate kubeconfig', output)
+        self.assertIn('Apply requires an existing readable regular certificate kubeconfig', output)
         self.assertNotIn('Stop backup timers on all hosts', output)
         self.assertNotIn('Fence every HA peer with vendor command', output)
 

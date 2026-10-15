@@ -9,12 +9,13 @@
     restore_selection: ''
     expected_cluster_id: ''
     destructive_confirm: ''
-    backup_root: /home/core/etcd-backups
+    backup_user_home: /home/core
+    backup_root: '{{ backup_user_home }}/etcd-backups'
     backup_source_hostname: ''
     recovery_host: ''
     restore_topology: ''
     restore_state_dir: /var/lib/ocp-etcd-restore
-    restore_controller_state_dir: /var/lib/ocp-etcd-restore-controller
+    restore_controller_state_dir: "{{ lookup('env', 'HOME') }}/.local/state/ocp-etcd-restore"
     post_api_kubeconfig: ''
     ha_machine_map: {}
     ocp_version_command: /usr/bin/rpm -q --qf %{VERSION} openshift-clients
@@ -28,6 +29,7 @@
     restore_etcd_cert_path: /etc/kubernetes/static-pod-resources/etcd-certs
     restore_etcd_manifest_path: /etc/kubernetes/manifests/etcd-pod.yaml
     backup_service_name: ocp-etcd-backup
+    restore_fixture_action_path: ''
   pre_tasks:
     - name: Validate topology and explicit HA mapping before mutation
       ansible.builtin.assert:
@@ -51,26 +53,47 @@
         fail_msg: 'Exact destructive confirmation required.'
       when: restore_mode == 'apply'
       run_once: true
-    - name: Inspect controller kubeconfig before HA mutation
+    - name: Inspect controller kubeconfig before mutation
       ansible.builtin.stat:
         path: '{{ post_api_kubeconfig }}'
       delegate_to: localhost
       become: false
       run_once: true
       register: restore_kubeconfig_stat
-      when: restore_topology == 'ha'
-    - name: Require readable regular controller kubeconfig before HA mutation
+      when: restore_mode == 'apply'
+    - name: Require readable regular controller kubeconfig before mutation
       ansible.builtin.assert:
         that:
           - restore_kubeconfig_stat.stat.exists
           - restore_kubeconfig_stat.stat.isreg
           - not restore_kubeconfig_stat.stat.islnk
           - restore_kubeconfig_stat.stat.readable
-        fail_msg: 'HA requires an existing readable regular certificate kubeconfig on the controller; no mutation occurred.'
+        fail_msg: 'Apply requires an existing readable regular certificate kubeconfig on the controller; no mutation occurred.'
       delegate_to: localhost
       become: false
       run_once: true
-      when: restore_topology == 'ha'
+      when: restore_mode == 'apply'
+    - name: Inspect controller oc client before mutation
+      ansible.builtin.stat:
+        path: '{{ restore_oc_path }}'
+      delegate_to: localhost
+      become: false
+      run_once: true
+      register: restore_oc_stat
+      when: restore_mode == 'apply' and restore_oc_path.startswith('/')
+    - name: Require executable controller oc client before mutation
+      ansible.builtin.assert:
+        that:
+          - restore_oc_path.startswith('/')
+          - restore_oc_stat.stat.exists
+          - restore_oc_stat.stat.isreg
+          - not restore_oc_stat.stat.islnk
+          - restore_oc_stat.stat.executable
+        fail_msg: 'Apply requires an existing executable absolute restore_oc_path on the controller; no mutation occurred.'
+      delegate_to: localhost
+      become: false
+      run_once: true
+      when: restore_mode == 'apply'
     - name: Detect each installed version without API access
       ansible.builtin.command:
         cmd: '{{ ocp_version_command }}'
@@ -80,7 +103,7 @@
     - name: Require equal supported installed versions
       ansible.builtin.assert:
         that:
-          - restore_installed_version.stdout | trim is match('^4\\.20\\.[0-9]+$')
+          - restore_installed_version.stdout | trim is match('^4\.20\.[0-9]+$')
           - restore_installed_version.stdout | trim == hostvars[groups['control_plane'][0]].restore_installed_version.stdout | trim
         fail_msg: 'Installed versions must be equal OCP 4.20.z on every control-plane host.'
     - name: Validate source set once
@@ -134,11 +157,21 @@
     - name: Require safe absolute managed backup and recovery paths
       ansible.builtin.assert:
         that:
-          - backup_root is match('^/home/core/[^.].*$')
+          - backup_user_home is match('^/[^.].*$')
+          - backup_root.startswith(backup_user_home ~ '/')
           - restore_state_dir is match('^/var/lib/ocp-etcd-restore(/.*)?$')
           - "'..' not in backup_root"
           - "'..' not in restore_state_dir"
         fail_msg: 'Backup or recovery path is outside its protected managed prefix.'
+    - name: Require safe writable controller state path before mutation
+      ansible.builtin.assert:
+        that:
+          - restore_controller_state_dir.startswith(lookup('env', 'HOME') ~ '/')
+          - "'..' not in restore_controller_state_dir"
+        fail_msg: 'Controller state must be a protected path below the invoking controller user home.'
+      delegate_to: localhost
+      become: false
+      run_once: true
     - name: Detect prior destructive checkpoint
       ansible.builtin.stat:
         path: '{{ restore_controller_state_dir }}/{{ restore_selection }}.json'
@@ -178,6 +211,12 @@
         enabled: false
         state: stopped
       changed_when: false
+      when: restore_fixture_action_path | length == 0
+    - name: Record simulated timer stop on all fixture hosts
+      ansible.builtin.command:
+        argv: ['{{ restore_fixture_action_path }}', timer-stop, '{{ inventory_hostname }}']
+      changed_when: true
+      when: restore_fixture_action_path | length > 0
     - name: Wait for backup locks on all hosts
       ansible.builtin.command:
         argv: [/usr/bin/flock, -n, /var/lock/ocp-etcd-backup.lock, /usr/bin/true]
@@ -281,7 +320,6 @@
       delegate_to: localhost
       become: false
       run_once: true
-      when: restore_topology == 'ha'
     - name: Enable temporary quorum guard after API recovery
       ansible.builtin.command:
         argv: ['{{ restore_oc_path }}', '--kubeconfig={{ post_api_kubeconfig }}', patch, etcd, cluster, --type=merge, '--patch={"spec":{"unsupportedConfigOverrides":{"useUnsupportedUnsafeNonHANonProductionUnstableEtcd":true}}}']
@@ -306,28 +344,34 @@
       become: false
       run_once: true
       when: restore_topology == 'ha'
-    - name: Verify etcd and control-plane operators after API recovery
+    - name: Require etcd and control-plane operators Available after API recovery
       ansible.builtin.command:
-        argv: ['{{ restore_oc_path }}', '--kubeconfig={{ post_api_kubeconfig }}', get, clusteroperators, etcd, kube-apiserver]
+        argv: ['{{ restore_oc_path }}', '--kubeconfig={{ post_api_kubeconfig }}', wait, '--for=condition=Available=True', '--timeout=10m', clusteroperator/etcd, clusteroperator/kube-apiserver]
       changed_when: false
       delegate_to: localhost
       become: false
       run_once: true
-      when: restore_topology == 'ha'
-    - name: Verify documented cluster stability after HA recovery
+    - name: Verify documented cluster stability after recovery
       ansible.builtin.command:
         argv: ['{{ restore_oc_path }}', '--kubeconfig={{ post_api_kubeconfig }}', adm, wait-for-stable-cluster, '--minimum-stable-period=5m']
       changed_when: false
       delegate_to: localhost
       become: false
       run_once: true
-      when: restore_topology == 'ha'
     - name: Take fresh backup before enabling its source timer
       ansible.builtin.systemd_service:
         name: '{{ backup_service_name }}.service'
         state: started
       delegate_to: '{{ backup_source_hostname }}'
       run_once: true
+      when: restore_fixture_action_path | length == 0
+    - name: Record simulated fresh backup
+      ansible.builtin.command:
+        argv: ['{{ restore_fixture_action_path }}', fresh-backup, '{{ backup_source_hostname }}']
+      delegate_to: '{{ backup_source_hostname }}'
+      changed_when: true
+      run_once: true
+      when: restore_fixture_action_path | length > 0
     - name: Enable source backup timer only after health and fresh backup
       ansible.builtin.systemd_service:
         name: '{{ backup_service_name }}.timer'
@@ -335,6 +379,14 @@
         state: started
       delegate_to: '{{ backup_source_hostname }}'
       run_once: true
+      when: restore_fixture_action_path | length == 0
+    - name: Record simulated timer enablement
+      ansible.builtin.command:
+        argv: ['{{ restore_fixture_action_path }}', timer-enable, '{{ backup_source_hostname }}']
+      delegate_to: '{{ backup_source_hostname }}'
+      changed_when: true
+      run_once: true
+      when: restore_fixture_action_path | length > 0
     - name: Write verified checkpoint
       ansible.builtin.copy:
         content: '{"phase":"VERIFIED","set_id":"{{ restore_selection }}","next_safe_action":"monitor the re-enabled source timer and retain checkpoint evidence"}'
