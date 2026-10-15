@@ -1,6 +1,13 @@
 ---
 - name: Delete one exact mapped non-recovery Machine
   block:
+    - name: Freshly reconcile the remaining captured Machine before deletion
+      ansible.builtin.command:
+        argv: ['{{ restore_ha_reconcile_path }}', '{{ restore_oc_path }}', '{{ post_api_kubeconfig }}', '{{ restore_controller_state_dir }}/{{ restore_selection }}/machine-recovery-inventory-v1.json', '{{ restore_controller_state_dir }}/{{ restore_selection }}/reconciled', '{{ ha_peer.inventory_hostname }}']
+      changed_when: false
+      delegate_to: localhost
+      become: false
+
     - name: Delete exact reconciled Machine with UID precondition
       ansible.builtin.command:
         argv: ['{{ restore_oc_path }}', '--kubeconfig={{ post_api_kubeconfig }}', delete, '-f', '{{ restore_controller_state_dir }}/{{ restore_selection }}/reconciled/{{ ha_peer.inventory_hostname }}.machine.json']

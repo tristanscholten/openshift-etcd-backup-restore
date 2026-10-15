@@ -154,6 +154,7 @@ def run(scenario: str) -> None:
                 require(max(i for i, line in enumerate(lines) if line == "fence") < lines.index("vendor-restore"), lines)
                 first, second = (next(i for i, line in enumerate(lines) if f"cp{n}.machine.json" in line) for n in (1, 2))
                 require(any("wait-for-stable-cluster" in line for line in lines[first + 1:second]), lines)
+                require(any("get machines" in line for line in lines[first + 1:second]), lines)
             else:
                 require("fence" not in lines, lines)
             require(json.loads(state_file.read_text())["phase"] == "VERIFIED", state_file.read_text())

@@ -42,14 +42,19 @@ def text(obj: dict, *keys: str) -> str:
 
 
 def main() -> None:
-    if len(sys.argv) != 5:
-        fail("usage: reconcile_machine_recovery.py OC KUBECONFIG INVENTORY OUTPUT_DIR")
-    oc, kubeconfig, inventory_path, output_path = sys.argv[1:]
+    if len(sys.argv) not in (5, 6):
+        fail("usage: reconcile_machine_recovery.py OC KUBECONFIG INVENTORY OUTPUT_DIR [INVENTORY_HOSTNAME]")
+    oc, kubeconfig, inventory_path, output_path = sys.argv[1:5]
+    requested_host = sys.argv[5] if len(sys.argv) == 6 else ""
     inventory = json.loads(pathlib.Path(inventory_path).read_text(encoding="utf-8"))
     control = inventory["control_plane"]
     peers = control["non_recovery"]
     if len(peers) != 2:
         fail("POST_API_MAP_RECONCILIATION_FAILED: invalid captured peer count")
+    if requested_host:
+        peers = [peer for peer in peers if peer.get("inventory_hostname") == requested_host]
+        if len(peers) != 1:
+            fail("POST_API_MAP_RECONCILIATION_FAILED: requested captured peer is absent")
     namespace = inventory["machine_api"]["namespace"]
     machines = get(oc, kubeconfig, "machines", "-n", namespace).get("items")
     nodes = get(oc, kubeconfig, "nodes").get("items")
@@ -57,7 +62,7 @@ def main() -> None:
         fail("POST_API_MAP_RECONCILIATION_FAILED: list response malformed")
     by_machine, by_node = index(machines), index(nodes)
     expected = {peer["machine_name"] for peer in peers}
-    if len(expected) != 2:
+    if len(expected) != len(peers):
         fail("POST_API_MAP_RECONCILIATION_FAILED: duplicate captured Machine")
     output = pathlib.Path(output_path)
     output.mkdir(mode=0o700, parents=True, exist_ok=True)

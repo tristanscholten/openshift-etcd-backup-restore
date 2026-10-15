@@ -91,6 +91,9 @@ def validate_machine_inventory(candidate: pathlib.Path, data: dict) -> None:
         fail("HA inventory pair binding mismatch")
     if capture.get("cluster_id") != data["cluster_id"] or capture.get("ocp_version") != data["ocp_version"]:
         fail("HA inventory cluster/version mismatch")
+    identity_command = require_string(capture.get("ssh_host_identity_command"), "ssh_host_identity_command")
+    if not identity_command.startswith("/") or any(character.isspace() for character in identity_command):
+        fail("unsafe HA SSH identity command")
     if machine_api.get("api_version") != MACHINE_API or machine_api.get("namespace") != "openshift-machine-api":
         fail("unsupported Machine API inventory")
     if control_plane.get("replicas") != 3:

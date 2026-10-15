@@ -145,6 +145,7 @@ class RestoreContractTests(unittest.TestCase):
         self.assertNotIn('ha_machine_map', restore)
         self.assertIn('Reconcile captured HA identities with restored API before any deletion', restore)
         self.assertIn('Recreate each captured HA Machine and wait before next', restore)
+        self.assertIn('Freshly reconcile the remaining captured Machine before deletion', peer)
         self.assertIn('Validate every candidate without reading archive content', listing)
         self.assertIn('backup_uninstall_confirm', uninstall)
         self.assertIn('Persist peer recovery failure checkpoint', peer)
