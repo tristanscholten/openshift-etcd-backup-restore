@@ -1,0 +1,150 @@
+# yamllint disable rule:line-length
+# Replace REPLACE_WITH_ONE_CONTROL_PLANE_HOSTNAME before applying.
+---
+# This is a custom scheduler around the vendor-installed host script; it does
+# not enable the Technology Preview OpenShift Backup CR feature.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: etcd-backup-system
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: etcd-backup
+  namespace: etcd-backup-system
+automountServiceAccountToken: false
+---
+# Allow only this service account to select the existing privileged SCC.
+# No ClusterRole, cluster-admin binding, API token, or kubeconfig is granted.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: use-privileged-scc
+  namespace: etcd-backup-system
+rules:
+  - apiGroups: ["security.openshift.io"]
+    resources: ["securitycontextconstraints"]
+    resourceNames: ["privileged"]
+    verbs: ["use"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: etcd-backup-use-privileged-scc
+  namespace: etcd-backup-system
+subjects:
+  - kind: ServiceAccount
+    name: etcd-backup
+    namespace: etcd-backup-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: use-privileged-scc
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: etcd-backup
+  namespace: etcd-backup-system
+spec:
+  schedule: "0 */6 * * *"
+  timeZone: "UTC"
+  concurrencyPolicy: Forbid
+  startingDeadlineSeconds: 1800
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      activeDeadlineSeconds: 1800
+      template:
+        spec:
+          serviceAccountName: etcd-backup
+          automountServiceAccountToken: false
+          restartPolicy: Never
+          nodeSelector:
+            # REQUIRED: replace with exactly one selected control-plane hostname.
+            kubernetes.io/hostname: REPLACE_WITH_ONE_CONTROL_PLANE_HOSTNAME
+          tolerations:
+            - key: node-role.kubernetes.io/control-plane
+              operator: Exists
+              effect: NoSchedule
+            - key: node-role.kubernetes.io/master
+              operator: Exists
+              effect: NoSchedule
+          containers:
+            - name: backup
+              image: registry.access.redhat.com/ubi9/ubi:latest
+              imagePullPolicy: IfNotPresent
+              securityContext:
+                privileged: true
+                runAsUser: 0
+                allowPrivilegeEscalation: true
+                readOnlyRootFilesystem: true
+              command: ["/bin/bash", "-ceu", "--"]
+              args:
+                - |
+                  set -o pipefail
+                  host_root=${HOST_ROOT:-/host}
+                  backup_dir="$host_root/home/core/etcd-backups"
+                  managed_prefix=.ocp-etcd-cronjob-managed-
+
+                  # The host path is root-private. Keep any existing files intact.
+                  mkdir -p "$backup_dir"
+                  chmod 0700 "$backup_dir"
+
+                  declare -A before
+                  while IFS= read -r -d '' path; do
+                    before["${path##*/}"]=1
+                  done < <(find "$backup_dir" -maxdepth 1 -type f \( -name 'snapshot_*.db' -o -name 'static_kuberesources_*.tar.gz' \) -print0)
+
+                  # OpenShift documents this exact host-side command after chroot /host.
+                  chroot "$host_root" /usr/local/bin/cluster-backup.sh /home/core/etcd-backups
+
+                  new_timestamps=()
+                  for snapshot in "$backup_dir"/snapshot_*.db; do
+                    [[ -f "$snapshot" && ! -L "$snapshot" ]] || continue
+                    timestamp=${snapshot##*/snapshot_}
+                    timestamp=${timestamp%.db}
+                    resources="$backup_dir/static_kuberesources_${timestamp}.tar.gz"
+                    [[ -f "$resources" && ! -L "$resources" ]] || continue
+                    [[ -z ${before["${snapshot##*/}"]+x} ]] || continue
+                    [[ -z ${before["${resources##*/}"]+x} ]] || continue
+                    new_timestamps+=("$timestamp")
+                  done
+                  [[ ${#new_timestamps[@]} -eq 1 ]] || {
+                    echo "vendor backup did not create exactly one new complete pair" >&2
+                    exit 1
+                  }
+
+                  timestamp=${new_timestamps[0]}
+                  # Only pairs marked by this CronJob are eligible for pruning.
+                  umask 077
+                  : > "$backup_dir/${managed_prefix}${timestamp}"
+
+                  managed_timestamps=()
+                  for marker in "$backup_dir"/${managed_prefix}*; do
+                    [[ -f "$marker" && ! -L "$marker" ]] || continue
+                    candidate=${marker##*/$managed_prefix}
+                    snapshot="$backup_dir/snapshot_${candidate}.db"
+                    resources="$backup_dir/static_kuberesources_${candidate}.tar.gz"
+                    [[ -f "$snapshot" && ! -L "$snapshot" ]] || continue
+                    [[ -f "$resources" && ! -L "$resources" ]] || continue
+                    managed_timestamps+=("$candidate")
+                  done
+
+                  # Prune only after the vendor command succeeded and its new complete pair was marked.
+                  while IFS= read -r obsolete; do
+                    rm -f -- "$backup_dir/snapshot_${obsolete}.db" \
+                      "$backup_dir/static_kuberesources_${obsolete}.tar.gz" \
+                      "$backup_dir/${managed_prefix}${obsolete}"
+                  done < <(printf '%s\n' "${managed_timestamps[@]}" | LC_ALL=C sort -r | tail -n +4)
+              volumeMounts:
+                - name: host-root
+                  mountPath: /host
+          volumes:
+            - name: host-root
+              hostPath:
+                path: /
+                type: Directory
