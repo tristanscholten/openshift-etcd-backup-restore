@@ -33,13 +33,14 @@ class BackupHarnessTests(unittest.TestCase):
         self.vendor = self.tmp / 'vendor'
         self.vendor.write_text('#!/bin/sh\nset -eu\nd=$1; echo marker > "$d/snapshot_$(date -u +%Y%m%dT%H%M%SZ).db"; f=$(find "$d" -name "snapshot_*.db" -printf "%f"); t=${f#snapshot_}; t=${t%.db}; echo keys > "$d/static_kuberesources_$t.tar.gz"\n')
         self.vendor.chmod(0o700)
-        self.env = {'PATH': '/usr/bin:/bin', 'OCP_ETCD_BACKUP_VERSION': '4.20.3', 'OCP_ETCD_BACKUP_CLUSTER_ID': 'fixture', 'OCP_ETCD_BACKUP_USER_HOME': str(self.home)}
+        self.capture = self.tmp / 'capture'; self.capture.write_text('#!/bin/sh\nexit 99\n'); self.capture.chmod(0o700)
+        self.env = {'PATH': '/usr/bin:/bin', 'OCP_ETCD_BACKUP_VERSION': '4.20.3', 'OCP_ETCD_BACKUP_CLUSTER_ID': 'fixture', 'OCP_ETCD_BACKUP_USER_HOME': str(self.home), 'OCP_ETCD_BACKUP_TOPOLOGY': 'sno'}
 
     def tearDown(self):
         shutil.rmtree(self.tmp)
 
     def run_backup(self):
-        return subprocess.run([str(RUNNER), str(self.root), str(self.vendor), str(self.validator)], env=self.env, text=True, capture_output=True)
+        return subprocess.run([str(RUNNER), str(self.root), str(self.vendor), str(self.validator), str(self.capture)], env=self.env, text=True, capture_output=True)
 
     def test_five_successes_retain_three_complete_pairs(self):
         for _ in range(5):
@@ -58,6 +59,15 @@ class BackupHarnessTests(unittest.TestCase):
         before = sorted(path.name for path in self.root.glob('set-*'))
         self.vendor.write_text('#!/bin/sh\nexit 1\n'); self.vendor.chmod(0o700)
         self.assertNotEqual(self.run_backup().returncode, 0)
+        self.assertEqual(before, sorted(path.name for path in self.root.glob('set-*')))
+
+    def test_failed_ha_capture_preserves_three_complete_sets(self):
+        for _ in range(3):
+            self.assertEqual(self.run_backup().returncode, 0); time.sleep(1.1)
+        before = sorted(path.name for path in self.root.glob('set-*'))
+        ha_env = dict(self.env, OCP_ETCD_BACKUP_TOPOLOGY='ha')
+        result = subprocess.run([str(RUNNER), str(self.root), str(self.vendor), str(self.validator), str(self.capture)], env=ha_env, text=True, capture_output=True)
+        self.assertNotEqual(result.returncode, 0)
         self.assertEqual(before, sorted(path.name for path in self.root.glob('set-*')))
 
     def test_corrupt_retention_candidate_fails_closed(self):

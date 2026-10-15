@@ -5,13 +5,16 @@ set -euo pipefail
 root=${1:?managed root required}
 vendor=${2:?vendor script required}
 validator=${3:?validator required}
+capture=${4:?capture helper required}
 user_home=${OCP_ETCD_BACKUP_USER_HOME:-/home/core}
 [[ $user_home == /* && $user_home != *'..'* ]] || { echo 'unsafe configured user home' >&2; exit 64; }
 [[ $root == "$user_home"/* && $root != *'..'* ]] || { echo 'unsafe managed root' >&2; exit 64; }
-[[ -d $root && ! -L $root && -x $vendor && -x $validator ]] || { echo 'unsafe root or executable' >&2; exit 65; }
+[[ -d $root && ! -L $root && -x $vendor && -x $validator && -x $capture ]] || { echo 'unsafe root or executable' >&2; exit 65; }
 : "${OCP_ETCD_BACKUP_VERSION:?set exact OCP 4.20.z version}"
 : "${OCP_ETCD_BACKUP_CLUSTER_ID:?set cluster ID}"
+: "${OCP_ETCD_BACKUP_TOPOLOGY:?set backup topology}"
 [[ $OCP_ETCD_BACKUP_VERSION =~ ^4\.20\.[0-9]+$ ]] || { echo 'unsupported OCP version' >&2; exit 66; }
+[[ $OCP_ETCD_BACKUP_TOPOLOGY == sno || $OCP_ETCD_BACKUP_TOPOLOGY == ha ]] || { echo 'unsupported backup topology' >&2; exit 66; }
 
 umask 077
 # A corrupt previously complete set makes retention unsafe; fail before creating a fourth set.
@@ -31,8 +34,26 @@ ts=${snapshots[0]#snapshot_}; ts=${ts%.db}
 [[ ${archives[0]} == "static_kuberesources_${ts}.tar.gz" ]] || { echo 'mismatched backup timestamps' >&2; exit 68; }
 [[ -f "$stage/${snapshots[0]}" && ! -L "$stage/${snapshots[0]}" && -f "$stage/${archives[0]}" && ! -L "$stage/${archives[0]}" ]] || { echo 'unsafe backup member' >&2; exit 69; }
 (cd "$stage" && sha256sum "${snapshots[0]}" "${archives[0]}") > "$stage/SHA256SUMS"
-printf '{"schema":1,"set_id":"%s","timestamp":"%s","ocp_version":"%s","cluster_id":"%s","snapshot":"%s","static_resources":"%s"}\n' \
-  "$id" "$ts" "$OCP_ETCD_BACKUP_VERSION" "$OCP_ETCD_BACKUP_CLUSTER_ID" "${snapshots[0]}" "${archives[0]}" > "$stage/metadata.json"
+snapshot_sha256=$(awk -v name="${snapshots[0]}" '$2 == name { print $1 }' "$stage/SHA256SUMS")
+resources_sha256=$(awk -v name="${archives[0]}" '$2 == name { print $1 }' "$stage/SHA256SUMS")
+pair_json=$(printf '{"cluster_id":"%s","ocp_version":"%s","set_id":"%s","snapshot":"%s","snapshot_sha256":"%s","static_resources":"%s","static_resources_sha256":"%s"}' "$OCP_ETCD_BACKUP_CLUSTER_ID" "$OCP_ETCD_BACKUP_VERSION" "$id" "${snapshots[0]}" "$snapshot_sha256" "${archives[0]}" "$resources_sha256")
+pair_payload_sha256=$(python3 -c 'import hashlib, json, sys; print(hashlib.sha256(json.dumps(json.loads(sys.argv[1]), sort_keys=True, separators=(",", ":")).encode()).hexdigest())' "$pair_json")
+inventory_name=''; inventory_sha256=''
+if [[ $OCP_ETCD_BACKUP_TOPOLOGY == ha ]]; then
+  inventory_name='machine-recovery-inventory-v1.json'
+  "$capture" "$pair_json" "$id" "$stage/$inventory_name"
+  [[ -f $stage/$inventory_name && ! -L $stage/$inventory_name ]] || { echo 'HA inventory capture did not create a regular file' >&2; exit 72; }
+  chmod 0600 "$stage/$inventory_name"
+  inventory_sha256=$(sha256sum "$stage/$inventory_name" | awk '{print $1}')
+  printf '%s  %s\n' "$inventory_sha256" "$inventory_name" >> "$stage/SHA256SUMS"
+fi
+python3 - "$stage/metadata.json" "$id" "$ts" "$OCP_ETCD_BACKUP_VERSION" "$OCP_ETCD_BACKUP_CLUSTER_ID" "${snapshots[0]}" "${archives[0]}" "$pair_payload_sha256" "$OCP_ETCD_BACKUP_TOPOLOGY" "$inventory_name" "$inventory_sha256" <<'PY'
+import json, sys
+path, set_id, timestamp, version, cluster, snapshot, resources, pair, topology, inventory, digest = sys.argv[1:]
+data = {"schema": 2, "set_id": set_id, "timestamp": timestamp, "ocp_version": version, "cluster_id": cluster, "snapshot": snapshot, "static_resources": resources, "pair_payload_sha256": pair, "restore_topology": topology}
+if topology == "ha": data.update(machine_recovery_inventory=inventory, machine_recovery_inventory_sha256=digest)
+open(path, "w", encoding="utf-8").write(json.dumps(data, sort_keys=True, separators=(",", ":")) + "\n")
+PY
 chmod 0600 "$stage"/*
 mv -- "$stage" "$final"
 touch "$final/COMPLETE"; chmod 0600 "$final/COMPLETE"

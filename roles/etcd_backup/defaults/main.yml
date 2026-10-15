@@ -10,3 +10,7 @@ backup_vendor_script: /usr/local/bin/cluster-backup.sh
 backup_ocp_version: ""
 backup_cluster_id: ""
 backup_environment_file: /etc/ocp-etcd-backup.conf
+backup_restore_topology: sno
+backup_ha_capture_config: {}
+backup_capture_kubeconfig: ""
+backup_oc_path: /usr/bin/oc

@@ -7,6 +7,9 @@
       - inventory_hostname == backup_source_hostname
       - backup_ocp_version is match('^4\\.20\\.[0-9]+$')
       - backup_cluster_id | length > 0
+      - backup_restore_topology in ['sno', 'ha']
+      - backup_restore_topology != 'ha' or backup_capture_kubeconfig is match('^/[^ ]+$')
+      - backup_restore_topology != 'ha' or backup_ha_capture_config is mapping
       - backup_root is match('^' ~ (backup_user_home | regex_escape) ~ '/[^.][A-Za-z0-9._/-]*$')
       - "'..' not in backup_root.split('/')"
     fail_msg: >-
@@ -48,6 +51,23 @@
     owner: root
     group: root
     mode: '0700'
+
+- name: Install healthy-cluster HA identity capture helper
+  ansible.builtin.copy:
+    src: capture_machine_recovery_inventory.py
+    dest: /usr/local/libexec/ocp-etcd-capture-machine-recovery-inventory
+    owner: root
+    group: root
+    mode: '0700'
+
+- name: Install root-only HA capture configuration
+  ansible.builtin.copy:
+    content: '{{ backup_ha_capture_config | to_json }}\n'
+    dest: /etc/ocp-etcd-backup-ha-capture.json
+    owner: root
+    group: root
+    mode: '0600'
+  no_log: true
 
 - name: Install root-only backup runtime configuration
   ansible.builtin.template:

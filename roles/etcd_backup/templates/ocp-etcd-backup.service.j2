@@ -4,7 +4,7 @@ Description=OCP etcd backup through installed vendor script
 [Service]
 Type=oneshot
 EnvironmentFile={{ backup_environment_file | quote }}
-ExecStart=/usr/bin/flock -n /var/lock/ocp-etcd-backup.lock /usr/local/sbin/ocp-etcd-backup-runner {{ backup_root | quote }} {{ backup_vendor_script | quote }} /usr/local/libexec/ocp-etcd-validate-backup
+ExecStart=/usr/bin/flock -n /var/lock/ocp-etcd-backup.lock /usr/local/sbin/ocp-etcd-backup-runner {{ backup_root | quote }} {{ backup_vendor_script | quote }} /usr/local/libexec/ocp-etcd-validate-backup /usr/local/libexec/ocp-etcd-capture-machine-recovery-inventory
 NoNewPrivileges=true
 PrivateTmp=true
 UMask=0077
