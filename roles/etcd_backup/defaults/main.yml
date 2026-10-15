@@ -6,3 +6,7 @@ backup_service_name: ocp-etcd-backup
 backup_install_confirm: false
 backup_catch_up_after_outage: false
 backup_vendor_script: /usr/local/bin/cluster-backup.sh
+# Supply these as external Ansible vars; they are written only to root-owned host config.
+backup_ocp_version: ""
+backup_cluster_id: ""
+backup_environment_file: /etc/ocp-etcd-backup.conf

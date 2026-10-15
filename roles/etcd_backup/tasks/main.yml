@@ -5,6 +5,8 @@
       - backup_install_confirm | bool
       - backup_source_hostname | length > 0
       - inventory_hostname == backup_source_hostname
+      - backup_ocp_version is match('^4\\.20\\.[0-9]+$')
+      - backup_cluster_id | length > 0
       - backup_root is match('^' ~ (backup_user_home | regex_escape) ~ '/[^.][A-Za-z0-9._/-]*$')
       - "'..' not in backup_root.split('/')"
     fail_msg: >-
@@ -46,6 +48,15 @@
     owner: root
     group: root
     mode: '0700'
+
+- name: Install root-only backup runtime configuration
+  ansible.builtin.template:
+    src: ocp-etcd-backup.env.j2
+    dest: '{{ backup_environment_file }}'
+    owner: root
+    group: root
+    mode: '0600'
+  no_log: true
 
 - name: Install backup service unit
   ansible.builtin.template:

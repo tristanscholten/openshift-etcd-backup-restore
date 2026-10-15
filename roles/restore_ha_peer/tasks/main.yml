@@ -1,0 +1,35 @@
+---
+- name: Delete one exact mapped non-recovery Machine
+  block:
+    - name: Delete mapped Machine
+      ansible.builtin.command:
+        argv: [oc, '--kubeconfig={{ post_api_kubeconfig }}', delete, machine, '--namespace=openshift-machine-api', '{{ ha_peer.value }}']
+      changed_when: true
+      delegate_to: localhost
+      become: false
+
+    - name: Wait for documented cluster stability before next Machine
+      ansible.builtin.command:
+        argv: [oc, '--kubeconfig={{ post_api_kubeconfig }}', adm, wait-for-stable-cluster, '--minimum-stable-period=5m']
+      changed_when: false
+      delegate_to: localhost
+      become: false
+
+    - name: Record recovered peer checkpoint
+      ansible.builtin.copy:
+        content: '{"phase":"HA_MACHINE_RECOVERY","set_id":"{{ restore_selection }}","recovered_peer":"{{ ha_peer.key }}","next_safe_action":"continue only after each stability gate"}'
+        dest: '{{ restore_controller_state_dir }}/{{ restore_selection }}.json'
+        mode: '0600'
+      delegate_to: localhost
+      become: false
+  rescue:
+    - name: Persist peer recovery failure checkpoint
+      ansible.builtin.copy:
+        content: '{"phase":"HA_MACHINE_RECOVERY_FAILED","set_id":"{{ restore_selection }}","failed_peer":"{{ ha_peer.key }}","next_safe_action":"do not rerun; assess failed Machine recovery"}'
+        dest: '{{ restore_controller_state_dir }}/{{ restore_selection }}.json'
+        mode: '0600'
+      delegate_to: localhost
+      become: false
+    - name: Stop after peer recovery failure
+      ansible.builtin.fail:
+        msg: 'HA_MACHINE_RECOVERY_FAILED: {{ ha_peer.key }} did not complete documented stability gate; inspect checkpoint.'

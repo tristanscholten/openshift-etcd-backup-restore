@@ -17,8 +17,11 @@ Use an external, host-key-verified SSH inventory; never commit credentials, kube
 
 ```sh
 ansible-playbook -i inventory/hosts.yml playbooks/backup-install.yml \
-  -e backup_install_confirm=true
-ansible-playbook -i inventory/hosts.yml playbooks/list-backups.yml
+  -e backup_install_confirm=true \
+  -e backup_source_hostname=SOURCE \
+  -e backup_ocp_version=4.20.Z \
+  -e backup_cluster_id=CLUSTER_ID
+ansible-playbook -i inventory/hosts.yml playbooks/list-backups.yml -e backup_source_hostname=SOURCE
 ansible-playbook -i inventory/hosts.yml playbooks/restore.yml \
   -e restore_mode=preflight -e restore_selection=SET_ID \
   -e expected_cluster_id=CLUSTER_ID
@@ -34,6 +37,13 @@ ansible-playbook -i inventory/hosts.yml playbooks/restore.yml \
 ```
 
 Read `docs/operator-runbook.md` and `docs/safety-and-support-boundary.md` first.
+
+The install writes these three values only to `/etc/ocp-etcd-backup.conf` with root-only mode `0600`; keep the command input and controller logs private. The scheduled unit loads that EnvironmentFile, so a timer cannot run with missing version or cluster identity. To remove only the managed schedule and helpers (never retained backup sets), use:
+
+```sh
+ansible-playbook -i inventory/hosts.yml playbooks/uninstall.yml \
+  -e backup_source_hostname=SOURCE -e backup_uninstall_confirm=true
+```
 
 ## Local verification
 

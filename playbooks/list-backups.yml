@@ -1,20 +1,47 @@
 ---
-- name: Read-only backup discovery
+- name: Read-only validated backup discovery
   hosts: control_plane
   become: true
   gather_facts: false
   vars:
     backup_root: /home/core/etcd-backups
+    backup_source_hostname: ''
+  pre_tasks:
+    - name: Require one nominated source for discovery
+      ansible.builtin.assert:
+        that:
+          - backup_source_hostname in groups['control_plane']
+        fail_msg: 'backup_source_hostname must name an inventory control-plane host.'
+      run_once: true
   tasks:
-    - name: List completion markers only
+    - name: Enumerate only managed candidate directories on source
       ansible.builtin.find:
-        paths: "{{ backup_root }}"
-        patterns: COMPLETE
-        file_type: file
+        paths: '{{ backup_root }}'
+        patterns: 'set-*'
+        file_type: directory
         recurse: false
-      register: completed
+      delegate_to: '{{ backup_source_hostname }}'
+      run_once: true
+      register: backup_candidate_dirs
       changed_when: false
 
-    - name: Print candidate directories without archive contents
+    - name: Validate every candidate without reading archive content
+      ansible.builtin.command:
+        argv:
+          - /usr/local/libexec/ocp-etcd-validate-backup
+          - '{{ backup_root }}'
+          - '{{ item.path | basename }}'
+      loop: '{{ backup_candidate_dirs.files }}'
+      loop_control:
+        label: '{{ item.path | basename }}'
+      delegate_to: '{{ backup_source_hostname }}'
+      run_once: true
+      register: backup_candidate_validation
+      changed_when: false
+      failed_when: false
+      check_mode: false
+
+    - name: Print only valid metadata candidates
       ansible.builtin.debug:
-        msg: "{{ completed.files | map(attribute='path') | map('dirname') | list }}"
+        msg: '{{ backup_candidate_validation.results | selectattr("rc", "equalto", 0) | map(attribute="stdout") | map("from_json") | list }}'
+      run_once: true

@@ -19,7 +19,7 @@
     ha_machine_map: {}
     ocp_version_command: /usr/bin/rpm -q --qf %{VERSION} openshift-clients
   pre_tasks:
-    - name: Validate all topology prerequisites before mutation
+    - name: Validate topology and explicit HA mapping before mutation
       ansible.builtin.assert:
         that:
           - restore_mode in ['preflight', 'apply']
@@ -29,8 +29,11 @@
           - recovery_host in groups['control_plane']
           - groups['control_plane'] | length in [1, 3]
           - (groups['control_plane'] | length == 1 and restore_topology == 'sno') or (groups['control_plane'] | length == 3 and restore_topology == 'ha')
-          - restore_topology != 'ha' or (post_api_kubeconfig | length > 0 and ha_machine_map | type_debug == 'dict' and ha_machine_map | length == 2 and recovery_host not in ha_machine_map)
-        fail_msg: 'Unsupported topology, mapping, selection, or recovery host; no mutation occurred.'
+          - restore_topology != 'ha' or post_api_kubeconfig | length > 0
+          - restore_topology != 'ha' or ha_machine_map | type_debug == 'dict'
+          - restore_topology != 'ha' or (ha_machine_map.keys() | list | sort == (groups['control_plane'] | difference([recovery_host]) | sort))
+          - restore_topology != 'ha' or (ha_machine_map.values() | select('string') | map('trim') | reject('equalto', '') | list | length == 2)
+        fail_msg: 'Unsupported topology, exact non-recovery Machine mapping, selection, or recovery host; no mutation occurred.'
       run_once: true
     - name: Require confirmation before apply mutation
       ansible.builtin.assert:
@@ -47,7 +50,7 @@
     - name: Require equal supported installed versions
       ansible.builtin.assert:
         that:
-          - restore_installed_version.stdout | trim is match('^4\.20\.[0-9]+$')
+          - restore_installed_version.stdout | trim is match('^4\\.20\\.[0-9]+$')
           - restore_installed_version.stdout | trim == hostvars[groups['control_plane'][0]].restore_installed_version.stdout | trim
         fail_msg: 'Installed versions must be equal OCP 4.20.z on every control-plane host.'
     - name: Validate source set once
@@ -92,9 +95,17 @@
     - name: End read-only preflight and check mode
       ansible.builtin.meta: end_play
       when: restore_mode == 'preflight' or ansible_check_mode
+    - name: Create controller checkpoint directory
+      ansible.builtin.file:
+        path: '{{ restore_controller_state_dir }}'
+        state: directory
+        mode: '0700'
+      delegate_to: localhost
+      become: false
+      run_once: true
     - name: Write preflight checkpoint
       ansible.builtin.copy:
-        content: '{"phase":"PREFLIGHT_PASSED","set_id":"{{ restore_selection }}"}'
+        content: '{"phase":"PREFLIGHT_PASSED","set_id":"{{ restore_selection }}","next_safe_action":"copy selected set"}'
         dest: '{{ restore_controller_state_dir }}/{{ restore_selection }}.json'
         mode: '0600'
       delegate_to: localhost
@@ -157,7 +168,7 @@
       when: inventory_hostname == recovery_host
     - name: Write immutable-copy checkpoint
       ansible.builtin.copy:
-        content: '{"phase":"RECOVERY_COPY_READY","set_id":"{{ restore_selection }}"}'
+        content: '{"phase":"RECOVERY_COPY_READY","set_id":"{{ restore_selection }}","next_safe_action":"fence all peers"}'
         dest: '{{ restore_controller_state_dir }}/{{ restore_selection }}.json'
         mode: '0600'
       delegate_to: localhost
@@ -179,7 +190,7 @@
       when: restore_topology == 'ha'
     - name: Write fenced checkpoint
       ansible.builtin.copy:
-        content: '{"phase":"FENCED","set_id":"{{ restore_selection }}","next_safe_action":"do not rerun"}'
+        content: '{"phase":"FENCED","set_id":"{{ restore_selection }}","next_safe_action":"do not rerun; await vendor restore assessment"}'
         dest: '{{ restore_controller_state_dir }}/{{ restore_selection }}.json'
         mode: '0600'
       delegate_to: localhost
@@ -218,23 +229,14 @@
       become: false
       run_once: true
       when: restore_topology == 'ha'
-    - name: Recreate mapped HA machines one at a time
-      ansible.builtin.command:
-        argv: [oc, '--kubeconfig={{ post_api_kubeconfig }}', delete, machine, '--namespace=openshift-machine-api', '{{ item.value }}']
-      changed_when: true
-      loop: '{{ ha_machine_map | dict2items }}'
-      delegate_to: localhost
-      become: false
-      run_once: true
+    - name: Recreate each mapped HA machine and wait before next
+      ansible.builtin.include_role:
+        name: restore_ha_peer
+      loop: '{{ ha_machine_map | dict2items | sort(attribute="key") }}'
+      loop_control:
+        loop_var: ha_peer
       when: restore_topology == 'ha'
-    - name: Wait for stable recovered HA cluster
-      ansible.builtin.command:
-        argv: [oc, '--kubeconfig={{ post_api_kubeconfig }}', adm, wait-for-stable-cluster, '--minimum-stable-period=5m']
-      changed_when: false
-      delegate_to: localhost
-      become: false
       run_once: true
-      when: restore_topology == 'ha'
     - name: Clear temporary quorum guard
       ansible.builtin.command:
         argv: [oc, '--kubeconfig={{ post_api_kubeconfig }}', patch, etcd, cluster, --type=json, '--patch=[{"op":"remove","path":"/spec/unsupportedConfigOverrides/useUnsupportedUnsafeNonHANonProductionUnstableEtcd"}]']
@@ -245,7 +247,7 @@
       when: restore_topology == 'ha'
     - name: Write verified checkpoint
       ansible.builtin.copy:
-        content: '{"phase":"VERIFIED","set_id":"{{ restore_selection }}"}'
+        content: '{"phase":"VERIFIED","set_id":"{{ restore_selection }}","next_safe_action":"take a fresh backup before enabling timer"}'
         dest: '{{ restore_controller_state_dir }}/{{ restore_selection }}.json'
         mode: '0600'
       delegate_to: localhost
