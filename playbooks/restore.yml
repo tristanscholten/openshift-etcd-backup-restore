@@ -26,6 +26,10 @@
     restore_oc_path: oc
     restore_min_free_kb: 1048576
     restore_min_certificate_age_seconds: 86400
+    restore_lock_retries: 10
+    restore_lock_delay: 2
+    restore_fence_retries: 30
+    restore_fence_delay: 2
     restore_etcd_cert_path: /etc/kubernetes/static-pod-resources/etcd-certs
     restore_etcd_manifest_path: /etc/kubernetes/manifests/etcd-pod.yaml
     backup_service_name: ocp-etcd-backup
@@ -222,8 +226,8 @@
         argv: [/usr/bin/flock, -n, /var/lock/ocp-etcd-backup.lock, /usr/bin/true]
       changed_when: false
       register: restore_lock_check
-      retries: 10
-      delay: 2
+      retries: '{{ restore_lock_retries | int }}'
+      delay: '{{ restore_lock_delay | int }}'
       until: restore_lock_check.rc == 0
     - name: Fetch selected set from the single source
       ansible.builtin.fetch:
@@ -274,20 +278,35 @@
       delegate_to: localhost
       become: false
       run_once: true
-    - name: Fence every HA peer with vendor command
-      ansible.builtin.command:
-        argv: ['{{ restore_vendor_disable_script }}']
-      changed_when: true
-      when: restore_topology == 'ha'
-    - name: Bounded wait for every HA etcd container to disappear
-      ansible.builtin.command:
-        argv: ['{{ restore_crictl_path }}', ps, --name, etcd, -q]
-      changed_when: false
-      register: restore_etcd_fence
-      retries: 30
-      delay: 2
-      until: restore_etcd_fence.rc in [0, 1] and restore_etcd_fence.stdout | trim == ''
-      when: restore_topology == 'ha'
+    - name: Fence all HA peers or stop at durable safe checkpoint
+      block:
+        - name: Fence every HA peer with vendor command
+          ansible.builtin.command:
+            argv: ['{{ restore_vendor_disable_script }}']
+          changed_when: true
+          when: restore_topology == 'ha'
+        - name: Bounded wait for every HA etcd container to disappear
+          ansible.builtin.command:
+            argv: ['{{ restore_crictl_path }}', ps, --name, etcd, -q]
+          changed_when: false
+          register: restore_etcd_fence
+          retries: '{{ restore_fence_retries | int }}'
+          delay: '{{ restore_fence_delay | int }}'
+          until: restore_etcd_fence.rc in [0, 1] and restore_etcd_fence.stdout | trim == ''
+          when: restore_topology == 'ha'
+      rescue:
+        - name: Persist incomplete fencing checkpoint
+          ansible.builtin.copy:
+            content: '{"phase":"FENCING_INCOMPLETE","set_id":"{{ restore_selection }}","next_safe_action":"inspect fencing failure; do not run vendor restore"}'
+            dest: '{{ restore_controller_state_dir }}/{{ restore_selection }}.json'
+            mode: '0600'
+          delegate_to: localhost
+          become: false
+          run_once: true
+        - name: Refuse vendor restore after incomplete fencing
+          ansible.builtin.fail:
+            msg: 'FENCING_INCOMPLETE: every HA peer must be fenced and have no etcd container before vendor restore.'
+          run_once: true
     - name: Write fenced checkpoint
       ansible.builtin.copy:
         content: '{"phase":"FENCED","set_id":"{{ restore_selection }}","next_safe_action":"do not rerun; await vendor restore assessment"}'

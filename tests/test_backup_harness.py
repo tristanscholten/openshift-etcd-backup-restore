@@ -3,6 +3,7 @@ import json
 import pathlib
 import shutil
 import subprocess
+import sys
 import tempfile
 import time
 import unittest
@@ -16,6 +17,7 @@ UNINSTALL = ROOT / 'playbooks/uninstall.yml'
 HA_PEER = ROOT / 'roles/restore_ha_peer/tasks/main.yml'
 SERVICE = ROOT / 'roles/etcd_backup/templates/ocp-etcd-backup.service.j2'
 ENV_TEMPLATE = ROOT / 'roles/etcd_backup/templates/ocp-etcd-backup.env.j2'
+ACTUAL_FIXTURE = ROOT / 'tests/run_actual_restore_fixture.py'
 
 
 class BackupHarnessTests(unittest.TestCase):
@@ -140,6 +142,18 @@ class RestoreContractTests(unittest.TestCase):
         for key in ('OCP_ETCD_BACKUP_USER_HOME', 'OCP_ETCD_BACKUP_VERSION', 'OCP_ETCD_BACKUP_CLUSTER_ID'):
             self.assertIn(key, env)
         self.assertIn('EnvironmentFile={{ backup_environment_file | quote }}', unit)
+
+    def test_actual_playbook_simulated_success_matrix(self):
+        for scenario in ('ha', 'sno'):
+            result = subprocess.run([sys.executable, str(ACTUAL_FIXTURE), scenario], text=True, capture_output=True)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn(f'SIMULATED_ACTUAL_RESTORE_{scenario.upper()}_OK', result.stdout)
+
+    def test_actual_playbook_simulated_fail_closed_matrix(self):
+        for scenario in ('missing-oc', 'fence-fail', 'container', 'rerun', 'check'):
+            result = subprocess.run([sys.executable, str(ACTUAL_FIXTURE), scenario], text=True, capture_output=True)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn(f'SIMULATED_ACTUAL_RESTORE_{scenario.upper()}_OK', result.stdout)
 
 
 if __name__ == '__main__':
