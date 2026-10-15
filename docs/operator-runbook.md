@@ -6,6 +6,6 @@
 4. List candidates with `playbooks/list-backups.yml`; select an explicit `set-YYYYMMDDTHHMMSSZ`. Never choose “latest” implicitly.
 5. Run restore preflight. It is read-only and must pass for every inventory control-plane host before any mutation.
 6. For an owner-authorized lab restore only, invoke apply with the exact `RESTORE_<cluster-id>` confirmation. Capture the controller output and preserve the selected source set.
-7. If fencing, copy, or vendor restore reports an error, stop. Do not rerun the destructive phase blindly. Escalate using the checkpoint and vendor logs.
+7. For HA only, supply an owner-held certificate kubeconfig and an exact two-entry `ha_machine_map` mapping each non-recovery inventory hostname to its Machine API Machine name. Apply then copies and re-hashes the nominated source set, fences every control-plane host, invokes one vendor restore, waits for API recovery, applies/clears the temporary quorum guard, recreates mapped machines sequentially, and waits for stability. If any gate or phase fails, stop at the recorded checkpoint; do not rerun.
 
 The role does not activate schedules during check mode. Backup failures preserve existing complete sets; investigate the vendor log and staging evidence. A local schedule does not guarantee a six-hour RPO when a run fails.
