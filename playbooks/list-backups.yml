@@ -6,6 +6,7 @@
   vars:
     backup_root: /home/core/etcd-backups
     backup_source_hostname: ''
+    backup_validator_path: /usr/local/libexec/ocp-etcd-validate-backup
   pre_tasks:
     - name: Require one nominated source for discovery
       ansible.builtin.assert:
@@ -28,7 +29,7 @@
     - name: Validate every candidate without reading archive content
       ansible.builtin.command:
         argv:
-          - /usr/local/libexec/ocp-etcd-validate-backup
+          - '{{ backup_validator_path }}'
           - '{{ backup_root }}'
           - '{{ item.path | basename }}'
       loop: '{{ backup_candidate_dirs.files }}'
@@ -37,6 +38,7 @@
       delegate_to: '{{ backup_source_hostname }}'
       run_once: true
       register: backup_candidate_validation
+      no_log: true
       changed_when: false
       failed_when: false
       check_mode: false

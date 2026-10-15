@@ -18,6 +18,7 @@ HA_PEER = ROOT / 'roles/restore_ha_peer/tasks/main.yml'
 SERVICE = ROOT / 'roles/etcd_backup/templates/ocp-etcd-backup.service.j2'
 ENV_TEMPLATE = ROOT / 'roles/etcd_backup/templates/ocp-etcd-backup.env.j2'
 ACTUAL_FIXTURE = ROOT / 'tests/run_actual_restore_fixture.py'
+ACTUAL_LIST_FIXTURE = ROOT / 'tests/run_actual_list_fixture.py'
 
 
 class BackupHarnessTests(unittest.TestCase):
@@ -142,6 +143,17 @@ class RestoreContractTests(unittest.TestCase):
         for key in ('OCP_ETCD_BACKUP_USER_HOME', 'OCP_ETCD_BACKUP_VERSION', 'OCP_ETCD_BACKUP_CLUSTER_ID'):
             self.assertIn(key, env)
         self.assertIn('EnvironmentFile={{ backup_environment_file | quote }}', unit)
+
+    def test_actual_list_playbook_excludes_corrupt_candidate(self):
+        result = subprocess.run([sys.executable, str(ACTUAL_LIST_FIXTURE)], text=True, capture_output=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('SIMULATED_ACTUAL_LIST_PLAYBOOK_OK', result.stdout)
+
+    def test_actual_playbook_version_refusal_matrix(self):
+        for scenario in ('mixed-patch', 'unknown-minor', 'selected-mismatch'):
+            result = subprocess.run([sys.executable, str(ACTUAL_FIXTURE), scenario], text=True, capture_output=True)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn(f'SIMULATED_ACTUAL_RESTORE_{scenario.upper()}_OK', result.stdout)
 
     def test_actual_playbook_simulated_success_matrix(self):
         for scenario in ('ha', 'sno'):

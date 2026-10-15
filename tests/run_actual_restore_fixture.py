@@ -32,6 +32,8 @@ def build_fixture(scenario: str) -> tuple[pathlib.Path, pathlib.Path, pathlib.Pa
     backup.mkdir(parents=True)
     bin_dir.mkdir()
     trace.write_text("")
+    selected_version = "4.20.4" if scenario == "selected-mismatch" else "4.20.3"
+    installed_version = "4.21.0" if scenario == "unknown-minor" else "4.20.3"
     snapshot, static = "snapshot_20261015T000000Z.db", "static_kuberesources_20261015T000000Z.tar.gz"
     (backup / snapshot).write_text("snapshot-marker\n")
     (backup / static).write_text("static-marker\n")
@@ -40,7 +42,7 @@ def build_fixture(scenario: str) -> tuple[pathlib.Path, pathlib.Path, pathlib.Pa
     ))
     (backup / "metadata.json").write_text(json.dumps({
         "schema": 1, "set_id": SET_ID, "timestamp": "20261015T000000Z",
-        "ocp_version": "4.20.3", "cluster_id": "fixture",
+        "ocp_version": selected_version, "cluster_id": "fixture",
         "snapshot": snapshot, "static_resources": static,
     }))
     (backup / "COMPLETE").write_text("")
@@ -52,7 +54,8 @@ def build_fixture(scenario: str) -> tuple[pathlib.Path, pathlib.Path, pathlib.Pa
     disable_body = f'#!/bin/sh\nprintf "fence\n" >> "{trace}"\n'
     if scenario == "fence-fail":
         disable_body += "exit 23\n"
-    script(bin_dir / "version", '#!/bin/sh\nprintf "4.20.3\\n"\n')
+    script(bin_dir / "version", f'#!/bin/sh\nprintf "{installed_version}\\n"\n')
+    script(bin_dir / "version-alt", '#!/bin/sh\nprintf "4.20.4\\n"\n')
     script(bin_dir / "crictl", crictl_body)
     script(bin_dir / "restore", f'#!/bin/sh\nprintf "vendor-restore\n" >> "{trace}"\n')
     script(bin_dir / "disable", disable_body)
@@ -64,7 +67,11 @@ def build_fixture(scenario: str) -> tuple[pathlib.Path, pathlib.Path, pathlib.Pa
     kubeconfig.write_text("apiVersion: v1\nclusters: []\n")
     hosts = ["cp0"] if scenario == "sno" else ["cp0", "cp1", "cp2"]
     inventory = fixture / "inventory.yml"
-    inventory.write_text("all:\n  children:\n    control_plane:\n      hosts:\n" + "".join(f"        {host}: {{ansible_connection: local}}\n" for host in hosts))
+    host_lines = []
+    for host in hosts:
+        command = bin_dir / ("version-alt" if scenario == "mixed-patch" and host == "cp1" else "version")
+        host_lines.append(f"        {host}: {{ansible_connection: local, restore_host_ocp_version_command: {command}}}\n")
+    inventory.write_text("all:\n  children:\n    control_plane:\n      hosts:\n" + "".join(host_lines))
     # The playbook deliberately accepts controller state only below HOME. Keep
     # that real non-root-controller route in the disposable test too.
     controller_root = pathlib.Path(tempfile.mkdtemp(prefix="ocp-etcd-restore-fixture-", dir=pathlib.Path.home()))
@@ -81,7 +88,7 @@ def build_fixture(scenario: str) -> tuple[pathlib.Path, pathlib.Path, pathlib.Pa
         "-e", f"backup_user_home={home}", "-e", f"backup_root={home / 'etcd-backups'}",
         "-e", f"restore_state_dir=/var/lib/ocp-etcd-restore/{fixture.name}",
         "-e", f"restore_controller_state_dir={state}", "-e", f"post_api_kubeconfig={kubeconfig}",
-        "-e", f"ocp_version_command={bin_dir / 'version'}", "-e", f"restore_validator_path={validator}",
+        "-e", f"restore_validator_path={validator}",
         "-e", f"restore_vendor_restore_script={bin_dir / 'restore'}",
         "-e", f"restore_vendor_disable_script={bin_dir / 'disable'}",
         "-e", f"restore_crictl_path={bin_dir / 'crictl'}", "-e", f"restore_etcd_manifest_path={manifest}",
@@ -141,8 +148,17 @@ def run(scenario: str) -> None:
             require(result.returncode == 0, output)
             require(lines == [f"validate:{SET_ID}"], lines)
             require(not state_file.exists(), state_file.exists())
-        else:
-            raise ValueError(scenario)
+        elif scenario in {"mixed-patch", "unknown-minor", "selected-mismatch"}:
+            require(result.returncode != 0, output)
+            require("Stop backup timers on all hosts" not in output, output)
+            require("vendor-restore" not in lines and "fence" not in lines, lines)
+            require(not state_file.exists(), state_file.exists())
+            if scenario == "selected-mismatch":
+                require("Selected set does not match cluster identity and installed exact z-stream" in output, output)
+                require(lines == [f"validate:{SET_ID}"], lines)
+            else:
+                require("Installed versions must be equal OCP 4.20.z" in output, output)
+                require(not lines, lines)
         print(f"SIMULATED_ACTUAL_RESTORE_{scenario.upper()}_OK")
         print("\n".join(lines))
     finally:
@@ -152,5 +168,5 @@ def run(scenario: str) -> None:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("scenario", choices=["ha", "sno", "missing-oc", "fence-fail", "container", "rerun", "check"])
+    parser.add_argument("scenario", choices=["ha", "sno", "missing-oc", "fence-fail", "container", "rerun", "check", "mixed-patch", "unknown-minor", "selected-mismatch"])
     run(parser.parse_args().scenario)

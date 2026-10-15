@@ -100,7 +100,7 @@
       when: restore_mode == 'apply'
     - name: Detect each installed version without API access
       ansible.builtin.command:
-        cmd: '{{ ocp_version_command }}'
+        cmd: '{{ restore_host_ocp_version_command | default(ocp_version_command) }}'
       changed_when: false
       check_mode: false
       register: restore_installed_version
