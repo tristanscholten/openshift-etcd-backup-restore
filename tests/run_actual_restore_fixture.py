@@ -25,7 +25,7 @@ def script(path: pathlib.Path, content: str) -> None:
     path.chmod(0o700)
 
 
-def build_fixture(scenario: str) -> tuple[pathlib.Path, pathlib.Path, list[str]]:
+def build_fixture(scenario: str) -> tuple[pathlib.Path, pathlib.Path, pathlib.Path, list[str]]:
     fixture = pathlib.Path(tempfile.mkdtemp(prefix="actual-restore-", dir=os.environ.get("TMPDIR")))
     home, bin_dir, trace = fixture / "backup-home", fixture / "bin", fixture / "trace"
     backup = home / "etcd-backups" / SET_ID
@@ -65,7 +65,10 @@ def build_fixture(scenario: str) -> tuple[pathlib.Path, pathlib.Path, list[str]]
     hosts = ["cp0"] if scenario == "sno" else ["cp0", "cp1", "cp2"]
     inventory = fixture / "inventory.yml"
     inventory.write_text("all:\n  children:\n    control_plane:\n      hosts:\n" + "".join(f"        {host}: {{ansible_connection: local}}\n" for host in hosts))
-    state = fixture / "controller-state"
+    # The playbook deliberately accepts controller state only below HOME. Keep
+    # that real non-root-controller route in the disposable test too.
+    controller_root = pathlib.Path(tempfile.mkdtemp(prefix="ocp-etcd-restore-fixture-", dir=pathlib.Path.home()))
+    state = controller_root / "state"
     oc_path = bin_dir / "oc"
     if scenario == "missing-oc":
         oc_path = bin_dir / "missing-oc"
@@ -93,7 +96,7 @@ def build_fixture(scenario: str) -> tuple[pathlib.Path, pathlib.Path, list[str]]
     if scenario == "rerun":
         state.mkdir(parents=True)
         (state / f"{SET_ID}.json").write_text('{"phase":"FENCED"}')
-    return fixture, trace, args
+    return fixture, controller_root, trace, args
 
 
 def require(condition: bool, message: object) -> None:
@@ -102,12 +105,12 @@ def require(condition: bool, message: object) -> None:
 
 
 def run(scenario: str) -> None:
-    fixture, trace, args = build_fixture(scenario)
+    fixture, controller_root, trace, args = build_fixture(scenario)
     try:
         result = subprocess.run(args, text=True, capture_output=True)
         output = result.stdout + result.stderr
         lines = trace.read_text().splitlines()
-        state_file = fixture / "controller-state" / f"{SET_ID}.json"
+        state_file = controller_root / "state" / f"{SET_ID}.json"
         if scenario in {"ha", "sno"}:
             require(result.returncode == 0, output)
             require(output.count("Fetch selected set from the single source") == 1, output)
@@ -144,6 +147,7 @@ def run(scenario: str) -> None:
         print("\n".join(lines))
     finally:
         shutil.rmtree(fixture, ignore_errors=True)
+        shutil.rmtree(controller_root, ignore_errors=True)
 
 
 if __name__ == "__main__":
