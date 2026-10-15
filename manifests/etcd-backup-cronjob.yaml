@@ -120,14 +120,26 @@ spec:
                   }
 
                   timestamp=${new_timestamps[0]}
-                  # Only pairs marked by this CronJob are eligible for pruning.
+                  # Record the minimum healthy-cluster identity needed to safely
+                  # select this ordinary vendor pair while the API is still alive.
+                  cluster_id=$(chroot "$host_root" /usr/bin/oc --kubeconfig /etc/kubernetes/kubeconfig get clusterversion/version -o jsonpath='{.spec.clusterID}')
+                  release=$(chroot "$host_root" /usr/bin/oc --kubeconfig /etc/kubernetes/kubeconfig get clusterversion/version -o jsonpath='{.status.desired.version}')
+                  [[ $cluster_id =~ ^[0-9a-fA-F-]{36}$ && $release =~ ^4\.20\.[0-9]+$ ]] || {
+                    echo "could not capture supported cluster release identity" >&2
+                    exit 1
+                  }
+                  snapshot_sha256=$(chroot "$host_root" /usr/bin/sha256sum "/home/core/etcd-backups/snapshot_${timestamp}.db" | awk '{print $1}')
+                  resources_sha256=$(chroot "$host_root" /usr/bin/sha256sum "/home/core/etcd-backups/static_kuberesources_${timestamp}.tar.gz" | awk '{print $1}')
+                  [[ $snapshot_sha256 =~ ^[0-9a-f]{64}$ && $resources_sha256 =~ ^[0-9a-f]{64}$ ]] || exit 1
+                  # Only pairs with this complete manifest are eligible for pruning.
                   umask 077
-                  : > "$backup_dir/${managed_prefix}${timestamp}"
+                  printf '{"schema":1,"timestamp":"%s","snapshot":"snapshot_%s.db","static_resources":"static_kuberesources_%s.tar.gz","cluster_id":"%s","ocp_version":"%s","snapshot_sha256":"%s","static_resources_sha256":"%s"}\n' "$timestamp" "$timestamp" "$timestamp" "$cluster_id" "$release" "$snapshot_sha256" "$resources_sha256" > "$backup_dir/${managed_prefix}${timestamp}.json"
 
                   managed_timestamps=()
-                  for marker in "$backup_dir"/${managed_prefix}*; do
+                  for marker in "$backup_dir"/${managed_prefix}*.json; do
                     [[ -f "$marker" && ! -L "$marker" ]] || continue
                     candidate=${marker##*/$managed_prefix}
+                    candidate=${candidate%.json}
                     snapshot="$backup_dir/snapshot_${candidate}.db"
                     resources="$backup_dir/static_kuberesources_${candidate}.tar.gz"
                     [[ -f "$snapshot" && ! -L "$snapshot" ]] || continue
@@ -139,7 +151,7 @@ spec:
                   while IFS= read -r obsolete; do
                     rm -f -- "$backup_dir/snapshot_${obsolete}.db" \
                       "$backup_dir/static_kuberesources_${obsolete}.tar.gz" \
-                      "$backup_dir/${managed_prefix}${obsolete}"
+                      "$backup_dir/${managed_prefix}${obsolete}.json"
                   done < <(printf '%s\n' "${managed_timestamps[@]}" | LC_ALL=C sort -r | tail -n +4)
               volumeMounts:
                 - name: host-root

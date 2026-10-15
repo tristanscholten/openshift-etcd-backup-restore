@@ -47,9 +47,24 @@ OCP 4.20 also documents a native Backup CR/CronJob feature. It is Technology Pre
 
 A node-local backup is not off-host DR and does not protect PV or application data. Store the static-resource archive securely: it can contain etcd encryption keys.
 
-## Restore compatibility
+## Restore
 
-This manifest produces ordinary vendor snapshot/static-resource pairs only. The existing guarded restore implementation intentionally requires its legacy managed metadata and (for HA) identity-capture evidence. Therefore it does **not** consume plain CronJob pairs. Restore is out of scope for this change; no restore source was changed.
+On a total control-plane outage, restore needs no old backup-role installation or helper. The CronJob writes a minimal root-private manifest beside each ordinary vendor pair while the healthy host API is available; it records the cluster UUID, exact desired OCP `4.20.z` release, and pair SHA-256 values. This is the release identity used by recovery; an `oc` client RPM version is not authoritative.
+
+For an owner-authorized OCP 4.20 recovery only, use one SSH Ansible invocation. It first discovers and displays complete pairs, prompts for one timestamp when `restore_selection` is omitted, validates the manifest before mutation, and then asks once for `RESTORE_<cluster-uuid>` if `destructive_confirm` is omitted:
+
+```sh
+ansible-playbook -i inventory/hosts.yml playbooks/restore.yml \
+  -e backup_source_hostname=SOURCE -e recovery_host=RECOVERY \
+  -e restore_topology=ha -e restore_cpms_enabled=false \
+  -e expected_cluster_id=CLUSTER_UUID -e expected_ocp_version=4.20.Z \
+  -e post_api_kubeconfig=/secure/path/kubeconfig \
+  -e restore_oc_path=/absolute/path/to/oc
+```
+
+Supported paths are SNO and exactly three non-CPMS control-plane hosts. SNO copies the matching pair to the node, runs installed `cluster-restore.sh` once, then waits for cluster stability. HA disables etcd by SSH on all three hosts, copies the same pair to one recovery host, runs `cluster-restore.sh` once, waits for the API, temporarily enables the documented etcd quorum-guard override, waits for stability, and clears that override. It never deletes Machines. CPMS is refused before destructive work: its degraded-member repair has distinct official prerequisites (two healthy members) and is not a substitute for snapshot DR after quorum loss.
+
+`restore_mode=preflight` performs discovery and validation only. No real OpenShift recovery has been exercised; disposable fixtures prove orchestration only.
 
 ## Legacy Ansible automation
 

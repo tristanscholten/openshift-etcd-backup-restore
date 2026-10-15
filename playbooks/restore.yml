@@ -1,245 +1,135 @@
 ---
-- name: Guarded OCP etcd restore
+# OCP 4.20 vendor snapshot recovery. CPMS recovery is deliberately refused:
+# its documented degraded-member repair has different healthy-quorum prerequisites.
+- name: Restore an OCP etcd snapshot from a CronJob vendor pair
   hosts: control_plane
   become: true
   gather_facts: false
   any_errors_fatal: true
   vars:
-    restore_mode: preflight
-    restore_selection: ''
-    expected_cluster_id: ''
-    destructive_confirm: ''
-    backup_user_home: /home/core
-    backup_root: '{{ backup_user_home }}/etcd-backups'
+    backup_root: /home/core/etcd-backups
     backup_source_hostname: ''
     recovery_host: ''
     restore_topology: ''
-    restore_state_dir: /var/lib/ocp-etcd-restore
-    restore_controller_state_dir: "{{ lookup('env', 'HOME') }}/.local/state/ocp-etcd-restore"
-    post_api_kubeconfig: ''
-
-    ocp_version_command: /usr/bin/rpm -q --qf %{VERSION} openshift-clients
-    restore_validator_path: /usr/local/libexec/ocp-etcd-validate-backup
+    restore_selection: ''
+    expected_cluster_id: ''
+    expected_ocp_version: ''
+    destructive_confirm: ''
+    restore_cpms_enabled: ''
+    restore_mode: apply
     restore_vendor_restore_script: /usr/local/bin/cluster-restore.sh
     restore_vendor_disable_script: /usr/local/bin/disable-etcd.sh
-    restore_crictl_path: /usr/bin/crictl
-    restore_oc_path: oc
-    restore_min_free_kb: 1048576
-    restore_min_certificate_age_seconds: 86400
-    restore_lock_retries: 10
-    restore_lock_delay: 2
-    restore_fence_retries: 30
-    restore_fence_delay: 2
-    restore_etcd_cert_path: /etc/kubernetes/static-pod-resources/etcd-certs
-    restore_etcd_manifest_path: /etc/kubernetes/manifests/etcd-pod.yaml
-    backup_service_name: ocp-etcd-backup
-    restore_fixture_action_path: ''
-    restore_ha_reconcile_path: '{{ playbook_dir }}/../roles/restore_ha_peer/files/reconcile_machine_recovery.py'
-    restore_ha_uid_delete_path: '{{ playbook_dir }}/../roles/restore_ha_peer/files/delete_machine_with_uid_precondition.py'
-    restore_ha_machine_namespace: openshift-machine-api
+    restore_oc_path: ''
+    post_api_kubeconfig: ''
+    restore_controller_state_dir: "{{ lookup('env', 'HOME') }}/.local/state/ocp-etcd-restore"
+    restore_stage_dir: /home/core/etcd-restore
+    restore_stage_owner: core
+    restore_stage_group: core
+    restore_api_retries: 60
+    restore_api_delay: 10
   pre_tasks:
-    - name: Validate topology before mutation
+    - name: Refuse unsupported topology before discovery
       ansible.builtin.assert:
         that:
-          - restore_mode in ['preflight', 'apply']
-          - restore_selection is match('^set-[0-9]{8}T[0-9]{6}Z$')
-          - expected_cluster_id | length > 0
+          - groups['control_plane'] | length in [1, 3]
           - backup_source_hostname in groups['control_plane']
           - recovery_host in groups['control_plane']
-          - groups['control_plane'] | length in [1, 3]
           - (groups['control_plane'] | length == 1 and restore_topology == 'sno') or (groups['control_plane'] | length == 3 and restore_topology == 'ha')
-          - restore_topology != 'ha' or post_api_kubeconfig | length > 0
-        fail_msg: 'Unsupported topology, selection, or recovery host; no mutation occurred.'
+          - restore_cpms_enabled == 'false'
+          - expected_cluster_id is match('^[0-9a-fA-F]{8}-(?:[0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}$')
+          - expected_ocp_version is match('^4\.20\.[0-9]+$')
+        fail_msg: 'Supported recovery is OCP 4.20 SNO or three-host non-CPMS HA with explicit cluster/release identity; no mutation occurred.'
       run_once: true
-    - name: Require confirmation before apply mutation
+    - name: Require installed vendor recovery command
+      ansible.builtin.stat:
+        path: '{{ restore_vendor_restore_script }}'
+      register: restore_vendor_restore_path
+    - name: Require installed HA fencing command
+      ansible.builtin.stat:
+        path: '{{ restore_vendor_disable_script }}'
+      register: restore_vendor_disable_path
+      when: restore_topology == 'ha'
+    - name: Fail if required vendor commands are absent
       ansible.builtin.assert:
-        that: destructive_confirm == 'RESTORE_' ~ expected_cluster_id
-        fail_msg: 'Exact destructive confirmation required.'
-      when: restore_mode == 'apply'
+        that: item.stat.exists and item.stat.isreg and not item.stat.islnk and item.stat.executable
+        fail_msg: 'Installed OpenShift recovery command missing; no mutation occurred.'
+      loop: "{{ [restore_vendor_restore_path] + ([restore_vendor_disable_path] if restore_topology == 'ha' else []) }}"
+  tasks:
+    - name: Discover complete CronJob vendor backup pairs without API access
+      ansible.builtin.script:
+        cmd: '{{ playbook_dir }}/../scripts/discover_vendor_backup.py {{ backup_root }}'
+      delegate_to: '{{ backup_source_hostname }}'
+      changed_when: false
       run_once: true
-    - name: Inspect controller kubeconfig before mutation
+      register: restore_candidates
+    - name: Display selectable complete backup pairs
+      ansible.builtin.debug:
+        msg: '{{ restore_candidates.stdout | from_json }}'
+      run_once: true
+    - name: Obtain one selected timestamp when not supplied
+      ansible.builtin.pause:
+        prompt: 'Enter one displayed backup timestamp (YYYYMMDDTHHMMSSZ)'
+      register: restore_selection_prompt
+      when: restore_selection | length == 0
+      run_once: true
+    - name: Set selected timestamp
+      ansible.builtin.set_fact:
+        restore_selected_timestamp: '{{ restore_selection if restore_selection | length > 0 else restore_selection_prompt.user_input }}'
+      run_once: true
+    - name: Validate selected pair and healthy-backup manifest
+      ansible.builtin.script:
+        cmd: '{{ playbook_dir }}/../scripts/discover_vendor_backup.py {{ backup_root }} {{ restore_selected_timestamp }}'
+      delegate_to: '{{ backup_source_hostname }}'
+      changed_when: false
+      run_once: true
+      register: restore_selected_manifest
+    - name: Require exact source release and cluster identity
+      ansible.builtin.assert:
+        that:
+          - (restore_selected_manifest.stdout | from_json).cluster_id == expected_cluster_id
+          - (restore_selected_manifest.stdout | from_json).ocp_version == expected_ocp_version
+        fail_msg: 'Selected pair does not match supplied cluster identity and exact OCP 4.20 z-stream; no mutation occurred.'
+      run_once: true
+    - name: End read-only discovery and preflight
+      ansible.builtin.meta: end_play
+      when: restore_mode == 'preflight' or ansible_check_mode
+    - name: Obtain one destructive confirmation when not supplied
+      ansible.builtin.pause:
+        prompt: 'Type RESTORE_<cluster-id> to destructively restore the selected snapshot'
+      register: destructive_confirm_prompt
+      when: destructive_confirm | length == 0
+      run_once: true
+    - name: Require exact confirmation and post-API inputs
+      ansible.builtin.assert:
+        that:
+          - (destructive_confirm if destructive_confirm | length > 0 else destructive_confirm_prompt.user_input) == 'RESTORE_' ~ expected_cluster_id
+          - post_api_kubeconfig | length > 0
+          - restore_oc_path is match('^/\S+$')
+        fail_msg: 'Exact confirmation, certificate kubeconfig, and absolute local oc are required; no mutation occurred.'
+      run_once: true
+    - name: Inspect controller certificate kubeconfig
       ansible.builtin.stat:
         path: '{{ post_api_kubeconfig }}'
       delegate_to: localhost
       become: false
       run_once: true
       register: restore_kubeconfig_stat
-      when: restore_mode == 'apply'
-    - name: Require readable regular controller kubeconfig before mutation
-      ansible.builtin.assert:
-        that:
-          - restore_kubeconfig_stat.stat.exists
-          - restore_kubeconfig_stat.stat.isreg
-          - not restore_kubeconfig_stat.stat.islnk
-          - restore_kubeconfig_stat.stat.readable
-        fail_msg: 'Apply requires an existing readable regular certificate kubeconfig on the controller; no mutation occurred.'
-      delegate_to: localhost
-      become: false
-      run_once: true
-      when: restore_mode == 'apply'
-    - name: Inspect controller oc client before mutation
+    - name: Inspect controller oc
       ansible.builtin.stat:
         path: '{{ restore_oc_path }}'
       delegate_to: localhost
       become: false
       run_once: true
       register: restore_oc_stat
-      when: restore_mode == 'apply' and restore_oc_path.startswith('/')
-    - name: Require executable controller oc client before mutation
+    - name: Require readable certificate kubeconfig and executable local oc
       ansible.builtin.assert:
         that:
-          - restore_oc_path.startswith('/')
-          - restore_oc_stat.stat.exists
-          - restore_oc_stat.stat.isreg
-          - not restore_oc_stat.stat.islnk
-          - restore_oc_stat.stat.executable
-        fail_msg: 'Apply requires an existing executable absolute restore_oc_path on the controller; no mutation occurred.'
+          - restore_kubeconfig_stat.stat.exists and restore_kubeconfig_stat.stat.isreg and not restore_kubeconfig_stat.stat.islnk and restore_kubeconfig_stat.stat.readable
+          - restore_oc_stat.stat.exists and restore_oc_stat.stat.isreg and not restore_oc_stat.stat.islnk and restore_oc_stat.stat.executable
+        fail_msg: 'Apply requires an existing readable regular certificate kubeconfig and executable absolute restore_oc_path; no mutation occurred.'
       delegate_to: localhost
       become: false
       run_once: true
-      when: restore_mode == 'apply'
-    - name: Detect each installed version without API access
-      ansible.builtin.command:
-        cmd: '{{ restore_host_ocp_version_command | default(ocp_version_command) }}'
-      changed_when: false
-      check_mode: false
-      register: restore_installed_version
-    - name: Require equal supported installed versions
-      ansible.builtin.assert:
-        that:
-          - restore_installed_version.stdout | trim is match('^4\.20\.[0-9]+$')
-          - restore_installed_version.stdout | trim == hostvars[groups['control_plane'][0]].restore_installed_version.stdout | trim
-        fail_msg: 'Installed versions must be equal OCP 4.20.z on every control-plane host.'
-    - name: Validate source set once
-      ansible.builtin.command:
-        argv: ['{{ restore_validator_path }}', '{{ backup_root }}', '{{ restore_selection }}']
-      changed_when: false
-      check_mode: false
-      register: restore_source_metadata
-      delegate_to: '{{ backup_source_hostname }}'
-      run_once: true
-    - name: Require selected z-stream and cluster identity
-      ansible.builtin.assert:
-        that:
-          - (restore_source_metadata.stdout | from_json).cluster_id == expected_cluster_id
-          - (restore_source_metadata.stdout | from_json).ocp_version == hostvars[groups['control_plane'][0]].restore_installed_version.stdout | trim
-        fail_msg: 'Selected set does not match cluster identity and installed exact z-stream.'
-      run_once: true
-    - name: Require bound HA evidence before any host mutation
-      ansible.builtin.assert:
-        that:
-          - (restore_source_metadata.stdout | from_json).schema | int == 2
-          - (restore_source_metadata.stdout | from_json).restore_topology == 'ha'
-          - (restore_source_metadata.stdout | from_json).machine_recovery_inventory == 'machine-recovery-inventory-v1.json'
-        fail_msg: 'HA_OFFLINE_IDENTITY_EVIDENCE_MISSING: selected HA set has no validated bound inventory; no mutation occurred.'
-      when: restore_topology == 'ha'
-      run_once: true
-    - name: Read captured HA inventory from the validated selected source
-      ansible.builtin.slurp:
-        src: '{{ backup_root }}/{{ restore_selection }}/machine-recovery-inventory-v1.json'
-      delegate_to: '{{ backup_source_hostname }}'
-      run_once: true
-      register: restore_ha_inventory_raw
-      when: restore_topology == 'ha'
-    - name: Derive immutable offline HA topology evidence
-      ansible.builtin.set_fact:
-        restore_ha_inventory: '{{ restore_ha_inventory_raw.content | b64decode | from_json }}'
-      run_once: true
-      when: restore_topology == 'ha'
-    - name: Require exact offline HA host topology and forbid map overrides
-      ansible.builtin.assert:
-        that:
-          - ('ha_' ~ 'machine_map') not in vars
-          - (groups['control_plane'] | sort) == (([restore_ha_inventory.control_plane.recovery_host] + restore_ha_inventory.control_plane.non_recovery) | map(attribute='inventory_hostname') | list | sort)
-          - recovery_host == restore_ha_inventory.control_plane.recovery_host.inventory_hostname
-          - restore_ha_inventory.capture.ssh_host_identity_command is match('^/\\S+$')
-        fail_msg: 'HA_OFFLINE_IDENTITY_EVIDENCE_MISMATCH: control-plane topology, recovery host, or identity source differs; no mutation occurred.'
-      run_once: true
-      when: restore_topology == 'ha'
-    - name: Build captured HA SSH identity lookup
-      ansible.builtin.set_fact:
-        restore_ha_identity_by_host: "{{ ([restore_ha_inventory.control_plane.recovery_host] + restore_ha_inventory.control_plane.non_recovery) | items2dict(key_name='inventory_hostname', value_name='ssh_host_identity') }}"
-      run_once: true
-      when: restore_topology == 'ha'
-    - name: Reproduce each captured SSH host identity offline
-      ansible.builtin.command:
-        argv: ['{{ restore_ha_inventory.capture.ssh_host_identity_command }}', '{{ inventory_hostname }}']
-      changed_when: false
-      register: restore_ssh_host_identity
-      when: restore_topology == 'ha'
-    - name: Require each reached host to match captured SSH identity
-      ansible.builtin.assert:
-        that: restore_ssh_host_identity.stdout | trim == restore_ha_identity_by_host[inventory_hostname]
-        fail_msg: 'HA_OFFLINE_IDENTITY_EVIDENCE_MISMATCH: SSH host identity differs from the selected backup capture; no mutation occurred.'
-      when: restore_topology == 'ha' and not ansible_check_mode
-    - name: Require vendor, runtime, and static-pod prerequisites on every host
-      ansible.builtin.stat:
-        path: '{{ item }}'
-      loop:
-        - '{{ restore_vendor_restore_script }}'
-        - '{{ restore_vendor_disable_script }}'
-        - '{{ restore_crictl_path }}'
-        - '{{ restore_etcd_manifest_path }}'
-        - '{{ restore_etcd_cert_path }}'
-      register: restore_vendor_paths
-    - name: Assert vendor, runtime, and static-pod prerequisites are safe
-      ansible.builtin.assert:
-        that: item.stat.exists and not item.stat.islnk and (item.stat.isdir or (item.stat.isreg and item.stat.executable))
-        fail_msg: 'Required installed vendor, runtime, certificate, or static-pod prerequisite is unavailable.'
-      loop: '{{ restore_vendor_paths.results }}'
-    - name: Measure free root filesystem space without mutation
-      ansible.builtin.command:
-        argv: [/usr/bin/df, -Pk, /]
-      changed_when: false
-      check_mode: false
-      register: restore_root_disk
-    - name: Require minimum free root filesystem space
-      ansible.builtin.assert:
-        that: (restore_root_disk.stdout_lines[-1].split()[3] | int) >= (restore_min_free_kb | int)
-        fail_msg: 'Insufficient free root filesystem space for a fail-closed restore.'
-    - name: Inspect certificate material age without mutation
-      ansible.builtin.stat:
-        path: '{{ restore_etcd_cert_path }}'
-      register: restore_cert_stat
-    - name: Require certificate material older than initial rotation window
-      ansible.builtin.assert:
-        that: (lookup('pipe', 'date +%s') | int) - (restore_cert_stat.stat.mtime | int) >= (restore_min_certificate_age_seconds | int)
-        fail_msg: 'Certificate material is younger than the configured rotation window; no mutation occurred.'
-    - name: Require safe absolute managed backup and recovery paths
-      ansible.builtin.assert:
-        that:
-          - backup_user_home is match('^/[^.].*$')
-          - backup_root.startswith(backup_user_home ~ '/')
-          - restore_state_dir is match('^/var/lib/ocp-etcd-restore(/.*)?$')
-          - "'..' not in backup_root"
-          - "'..' not in restore_state_dir"
-        fail_msg: 'Backup or recovery path is outside its protected managed prefix.'
-    - name: Require safe writable controller state path before mutation
-      ansible.builtin.assert:
-        that:
-          - restore_controller_state_dir.startswith(lookup('env', 'HOME') ~ '/')
-          - "'..' not in restore_controller_state_dir"
-        fail_msg: 'Controller state must be a protected path below the invoking controller user home.'
-      delegate_to: localhost
-      become: false
-      run_once: true
-    - name: Detect prior destructive checkpoint
-      ansible.builtin.stat:
-        path: '{{ restore_controller_state_dir }}/{{ restore_selection }}.json'
-      delegate_to: localhost
-      become: false
-      run_once: true
-      register: restore_prior_state
-    - name: Refuse blind destructive rerun
-      ansible.builtin.assert:
-        that: not restore_prior_state.stat.exists
-        fail_msg: 'RESTORE_RERUN_REFUSED: inspect the durable checkpoint; do not rerun fenced or vendor restore.'
-      when: restore_mode == 'apply'
-      run_once: true
-  tasks:
-    - name: End read-only preflight and check mode
-      ansible.builtin.meta: end_play
-      when: restore_mode == 'preflight' or ansible_check_mode
     - name: Create controller checkpoint directory
       ansible.builtin.file:
         path: '{{ restore_controller_state_dir }}'
@@ -248,236 +138,132 @@
       delegate_to: localhost
       become: false
       run_once: true
-    - name: Write preflight checkpoint
-      ansible.builtin.copy:
-        content: '{"phase":"PREFLIGHT_PASSED","set_id":"{{ restore_selection }}","next_safe_action":"copy selected set"}'
-        dest: '{{ restore_controller_state_dir }}/{{ restore_selection }}.json'
-        mode: '0600'
+    - name: Refuse an interrupted or completed restore rerun
+      ansible.builtin.stat:
+        path: '{{ restore_controller_state_dir }}/{{ restore_selected_timestamp }}.json'
       delegate_to: localhost
       become: false
       run_once: true
-    - name: Stop backup timers on all hosts
-      ansible.builtin.systemd_service:
-        name: ocp-etcd-backup.timer
-        enabled: false
-        state: stopped
-      changed_when: false
-      when: restore_fixture_action_path | length == 0
-    - name: Record simulated timer stop on all fixture hosts
-      ansible.builtin.command:
-        argv: ['{{ restore_fixture_action_path }}', timer-stop, '{{ inventory_hostname }}']
-      changed_when: true
-      when: restore_fixture_action_path | length > 0
-    - name: Wait for backup locks on all hosts
-      ansible.builtin.command:
-        argv: [/usr/bin/flock, -n, /var/lock/ocp-etcd-backup.lock, /usr/bin/true]
-      changed_when: false
-      register: restore_lock_check
-      retries: '{{ restore_lock_retries | int }}'
-      delay: '{{ restore_lock_delay | int }}'
-      until: restore_lock_check.rc == 0
-    - name: Fetch selected set from the single source
+      register: restore_checkpoint
+    - name: Require no existing restore checkpoint
+      ansible.builtin.assert:
+        that: not restore_checkpoint.stat.exists
+        fail_msg: 'RESTORE_RERUN_REFUSED: selected backup has an existing recovery checkpoint.'
+      run_once: true
+    - name: Fetch exactly the selected matching pair from one source
       ansible.builtin.fetch:
-        src: '{{ backup_root }}/{{ restore_selection }}/{{ item }}'
-        dest: '{{ restore_controller_state_dir }}/{{ restore_selection }}/'
+        src: '{{ backup_root }}/{{ item }}'
+        dest: '{{ restore_controller_state_dir }}/{{ restore_selected_timestamp }}/'
         flat: true
-        validate_checksum: true
-      loop: "{{ ['COMPLETE', 'metadata.json', 'SHA256SUMS', (restore_source_metadata.stdout | from_json).snapshot, (restore_source_metadata.stdout | from_json).static_resources] + (['machine-recovery-inventory-v1.json'] if restore_topology == 'ha' else []) }}"
+      loop:
+        - 'snapshot_{{ restore_selected_timestamp }}.db'
+        - 'static_kuberesources_{{ restore_selected_timestamp }}.tar.gz'
+        - '.ocp-etcd-cronjob-managed-{{ restore_selected_timestamp }}.json'
       delegate_to: '{{ backup_source_hostname }}'
       run_once: true
-    - name: Create immutable recovery workspace
-      ansible.builtin.file:
-        path: '{{ restore_state_dir }}/{{ restore_selection }}'
-        state: directory
-        owner: root
-        group: root
-        mode: '0700'
-      when: inventory_hostname == recovery_host
-    - name: Copy source set to recovery host
-      ansible.builtin.copy:
-        src: '{{ restore_controller_state_dir }}/{{ restore_selection }}/{{ item }}'
-        dest: '{{ restore_state_dir }}/{{ restore_selection }}/{{ item }}'
-        owner: root
-        group: root
-        mode: '0600'
-      loop: "{{ ['COMPLETE', 'metadata.json', 'SHA256SUMS', (restore_source_metadata.stdout | from_json).snapshot, (restore_source_metadata.stdout | from_json).static_resources] + (['machine-recovery-inventory-v1.json'] if restore_topology == 'ha' else []) }}"
-      when: inventory_hostname == recovery_host
-    - name: Verify copied source set hash gate
+    - name: Verify fetched pair integrity before host mutation
       ansible.builtin.command:
-        argv: ['{{ restore_validator_path }}', '{{ restore_state_dir }}', '{{ restore_selection }}']
+        argv: ['/usr/bin/python3', '{{ playbook_dir }}/../scripts/discover_vendor_backup.py', '{{ restore_controller_state_dir }}/{{ restore_selected_timestamp }}', '{{ restore_selected_timestamp }}']
       changed_when: false
-      when: inventory_hostname == recovery_host
-    - name: Write immutable-copy checkpoint
+      delegate_to: localhost
+      become: false
+      run_once: true
+    - name: Record restore in progress
       ansible.builtin.copy:
-        content: '{"phase":"RECOVERY_COPY_READY","set_id":"{{ restore_selection }}","next_safe_action":"fence all peers"}'
-        dest: '{{ restore_controller_state_dir }}/{{ restore_selection }}.json'
+        content: '{"phase":"IN_PROGRESS","timestamp":"{{ restore_selected_timestamp }}"}'
+        dest: '{{ restore_controller_state_dir }}/{{ restore_selected_timestamp }}.json'
         mode: '0600'
       delegate_to: localhost
       become: false
       run_once: true
-    - name: Fence all HA peers or stop at durable safe checkpoint
+    - name: Run documented SSH recovery and post-API health checks
       block:
-        - name: Fence every HA peer with vendor command
+        - name: Create restore directory on recovery host
+          ansible.builtin.file:
+            path: '{{ restore_stage_dir }}/{{ restore_selected_timestamp }}'
+            state: directory
+            owner: '{{ restore_stage_owner }}'
+            group: '{{ restore_stage_group }}'
+            mode: '0700'
+          when: inventory_hostname == recovery_host
+        - name: Copy same matching pair to recovery host
+          ansible.builtin.copy:
+            src: '{{ restore_controller_state_dir }}/{{ restore_selected_timestamp }}/{{ item }}'
+            dest: '{{ restore_stage_dir }}/{{ restore_selected_timestamp }}/{{ item }}'
+            owner: '{{ restore_stage_owner }}'
+            group: '{{ restore_stage_group }}'
+            mode: '0600'
+          loop:
+            - 'snapshot_{{ restore_selected_timestamp }}.db'
+            - 'static_kuberesources_{{ restore_selected_timestamp }}.tar.gz'
+            - '.ocp-etcd-cronjob-managed-{{ restore_selected_timestamp }}.json'
+          when: inventory_hostname == recovery_host
+        - name: Verify copied pair integrity on recovery host
+          ansible.builtin.script:
+            cmd: '{{ playbook_dir }}/../scripts/discover_vendor_backup.py {{ restore_stage_dir }}/{{ restore_selected_timestamp }} {{ restore_selected_timestamp }}'
+          changed_when: false
+          when: inventory_hostname == recovery_host
+        - name: Disable etcd on every HA control-plane host
           ansible.builtin.command:
             argv: ['{{ restore_vendor_disable_script }}']
           changed_when: true
           when: restore_topology == 'ha'
-        - name: Bounded wait for every HA etcd container to disappear
+        - name: Restore exactly once on recovery host before any API operation
           ansible.builtin.command:
-            argv: ['{{ restore_crictl_path }}', ps, --name, etcd, -q]
+            argv: ['{{ restore_vendor_restore_script }}', '{{ restore_stage_dir }}/{{ restore_selected_timestamp }}']
+          changed_when: true
+          when: inventory_hostname == recovery_host
+        - name: Wait for API readiness only after SSH vendor recovery
+          ansible.builtin.command:
+            argv: ['{{ restore_oc_path }}', '--kubeconfig={{ post_api_kubeconfig }}', 'get', '--raw=/readyz']
           changed_when: false
-          register: restore_etcd_fence
-          retries: '{{ restore_fence_retries | int }}'
-          delay: '{{ restore_fence_delay | int }}'
-          until: restore_etcd_fence.rc in [0, 1] and restore_etcd_fence.stdout | trim == ''
+          register: restore_api
+          retries: '{{ restore_api_retries | int }}'
+          delay: '{{ restore_api_delay | int }}'
+          until: restore_api.rc == 0
+          delegate_to: localhost
+          become: false
+          run_once: true
+        - name: Enable temporary etcd quorum guard override
+          ansible.builtin.command:
+            argv: ['{{ restore_oc_path }}', '--kubeconfig={{ post_api_kubeconfig }}', patch, etcd, cluster, --type=merge, '--patch={"spec":{"unsupportedConfigOverrides":{"useUnsupportedUnsafeNonHANonProductionUnstableEtcd":true}}}']
+          changed_when: true
+          delegate_to: localhost
+          become: false
+          run_once: true
+          when: restore_topology == 'ha'
+        - name: Wait for stable recovered cluster
+          ansible.builtin.command:
+            argv: ['{{ restore_oc_path }}', '--kubeconfig={{ post_api_kubeconfig }}', adm, wait-for-stable-cluster]
+          changed_when: false
+          delegate_to: localhost
+          become: false
+          run_once: true
+        - name: Clear temporary etcd quorum guard after successful HA stability
+          ansible.builtin.command:
+            argv: ['{{ restore_oc_path }}', '--kubeconfig={{ post_api_kubeconfig }}', patch, etcd, cluster, --type=merge, '--patch={"spec":{"unsupportedConfigOverrides":null}}']
+          changed_when: true
+          delegate_to: localhost
+          become: false
+          run_once: true
           when: restore_topology == 'ha'
       rescue:
-        - name: Persist incomplete fencing checkpoint
+        - name: Record failed recovery checkpoint
           ansible.builtin.copy:
-            content: '{"phase":"FENCING_INCOMPLETE","set_id":"{{ restore_selection }}","next_safe_action":"inspect fencing failure; do not run vendor restore"}'
-            dest: '{{ restore_controller_state_dir }}/{{ restore_selection }}.json'
+            content: '{"phase":"FAILED","timestamp":"{{ restore_selected_timestamp }}"}'
+            dest: '{{ restore_controller_state_dir }}/{{ restore_selected_timestamp }}.json'
             mode: '0600'
           delegate_to: localhost
           become: false
           run_once: true
-        - name: Refuse vendor restore after incomplete fencing
+        - name: Stop after failed recovery
           ansible.builtin.fail:
-            msg: 'FENCING_INCOMPLETE: every HA peer must be fenced and have no etcd container before vendor restore.'
+            msg: 'RESTORE_FAILED: inspect the durable checkpoint before any manual recovery action.'
           run_once: true
-    - name: Write fenced checkpoint
-      ansible.builtin.copy:
-        content: '{"phase":"FENCED","set_id":"{{ restore_selection }}","next_safe_action":"do not rerun; await vendor restore assessment"}'
-        dest: '{{ restore_controller_state_dir }}/{{ restore_selection }}.json'
-        mode: '0600'
-      delegate_to: localhost
-      become: false
-      run_once: true
-    - name: Invoke vendor restore once on recovery host
-      ansible.builtin.command:
-        argv: ['{{ restore_vendor_restore_script }}', '{{ restore_state_dir }}/{{ restore_selection }}']
-      changed_when: true
-      when: inventory_hostname == recovery_host
-    - name: Write vendor restore checkpoint
-      ansible.builtin.copy:
-        content: '{"phase":"VENDOR_RESTORE_STARTED","set_id":"{{ restore_selection }}","next_safe_action":"wait for API; do not rerun"}'
-        dest: '{{ restore_controller_state_dir }}/{{ restore_selection }}.json'
-        mode: '0600'
-      delegate_to: localhost
-      become: false
-      run_once: true
-    - name: Wait for API only after vendor restore
-      ansible.builtin.command:
-        argv: ['{{ restore_oc_path }}', '--kubeconfig={{ post_api_kubeconfig }}', version]
-      changed_when: false
-      register: restore_api_ready
-      retries: 60
-      delay: 10
-      until: restore_api_ready.rc == 0
-      delegate_to: localhost
-      become: false
-      run_once: true
-    - name: Enable temporary quorum guard after API recovery
-      ansible.builtin.command:
-        argv: ['{{ restore_oc_path }}', '--kubeconfig={{ post_api_kubeconfig }}', patch, etcd, cluster, --type=merge, '--patch={"spec":{"unsupportedConfigOverrides":{"useUnsupportedUnsafeNonHANonProductionUnstableEtcd":true}}}']
-      changed_when: true
-      delegate_to: localhost
-      become: false
-      run_once: true
-      when: restore_topology == 'ha'
-    - name: Reconcile captured HA identities with restored API before any deletion
-      when: restore_topology == 'ha'
-      block:
-        - name: Read-only reconcile every captured HA identity and operator gate
-          ansible.builtin.command:
-            argv: ['{{ restore_ha_reconcile_path }}', '{{ restore_oc_path }}', '{{ post_api_kubeconfig }}', '{{ restore_controller_state_dir }}/{{ restore_selection }}/machine-recovery-inventory-v1.json', '{{ restore_controller_state_dir }}/{{ restore_selection }}/reconciled']
-          changed_when: false
-          delegate_to: localhost
-          become: false
-          run_once: true
-      rescue:
-        - name: Persist post-API reconciliation failure checkpoint
-          ansible.builtin.copy:
-            content: '{"phase":"POST_API_MAP_RECONCILIATION_FAILED","set_id":"{{ restore_selection }}","next_safe_action":"inspect read-only identity and operator health evidence; do not delete a Machine"}'
-            dest: '{{ restore_controller_state_dir }}/{{ restore_selection }}.json'
-            mode: '0600'
-          delegate_to: localhost
-          become: false
-          run_once: true
-        - name: Refuse Machine deletion after failed post-API reconciliation
-          ansible.builtin.fail:
-            msg: 'POST_API_MAP_RECONCILIATION_FAILED: no Machine deletion is permitted.'
-          run_once: true
-    - name: Derive HA deletion sequence only from captured inventory
-      ansible.builtin.set_fact:
-        restore_ha_peers: "{{ ((lookup('file', restore_controller_state_dir ~ '/' ~ restore_selection ~ '/machine-recovery-inventory-v1.json') | from_json).control_plane.non_recovery | sort(attribute='inventory_hostname')) }}"
-        restore_ha_machine_namespace: "{{ (lookup('file', restore_controller_state_dir ~ '/' ~ restore_selection ~ '/machine-recovery-inventory-v1.json') | from_json).machine_api.namespace }}"
-      delegate_to: localhost
-      become: false
-      run_once: true
-      when: restore_topology == 'ha'
-    - name: Recreate each captured HA Machine and wait before next
-      ansible.builtin.include_role:
-        name: restore_ha_peer
-      loop: '{{ restore_ha_peers }}'
-      loop_control:
-        loop_var: ha_peer
-      when: restore_topology == 'ha'
-      run_once: true
-    - name: Clear temporary quorum guard
-      ansible.builtin.command:
-        argv: ['{{ restore_oc_path }}', '--kubeconfig={{ post_api_kubeconfig }}', patch, etcd, cluster, --type=json, '--patch=[{"op":"remove","path":"/spec/unsupportedConfigOverrides/useUnsupportedUnsafeNonHANonProductionUnstableEtcd"}]']
-      changed_when: true
-      delegate_to: localhost
-      become: false
-      run_once: true
-      when: restore_topology == 'ha'
-    - name: Require etcd and control-plane operators Available after API recovery
-      ansible.builtin.command:
-        argv: ['{{ restore_oc_path }}', '--kubeconfig={{ post_api_kubeconfig }}', wait, '--for=condition=Available=True', '--timeout=10m', clusteroperator/etcd, clusteroperator/kube-apiserver]
-      changed_when: false
-      delegate_to: localhost
-      become: false
-      run_once: true
-    - name: Verify documented cluster stability after recovery
-      ansible.builtin.command:
-        argv: ['{{ restore_oc_path }}', '--kubeconfig={{ post_api_kubeconfig }}', adm, wait-for-stable-cluster, '--minimum-stable-period=5m']
-      changed_when: false
-      delegate_to: localhost
-      become: false
-      run_once: true
-    - name: Take fresh backup before enabling its source timer
-      ansible.builtin.systemd_service:
-        name: '{{ backup_service_name }}.service'
-        state: started
-      delegate_to: '{{ backup_source_hostname }}'
-      run_once: true
-      when: restore_fixture_action_path | length == 0
-    - name: Record simulated fresh backup
-      ansible.builtin.command:
-        argv: ['{{ restore_fixture_action_path }}', fresh-backup, '{{ backup_source_hostname }}']
-      delegate_to: '{{ backup_source_hostname }}'
-      changed_when: true
-      run_once: true
-      when: restore_fixture_action_path | length > 0
-    - name: Enable source backup timer only after health and fresh backup
-      ansible.builtin.systemd_service:
-        name: '{{ backup_service_name }}.timer'
-        enabled: true
-        state: started
-      delegate_to: '{{ backup_source_hostname }}'
-      run_once: true
-      when: restore_fixture_action_path | length == 0
-    - name: Record simulated timer enablement
-      ansible.builtin.command:
-        argv: ['{{ restore_fixture_action_path }}', timer-enable, '{{ backup_source_hostname }}']
-      delegate_to: '{{ backup_source_hostname }}'
-      changed_when: true
-      run_once: true
-      when: restore_fixture_action_path | length > 0
     - name: Write verified checkpoint
       ansible.builtin.copy:
-        content: '{"phase":"VERIFIED","set_id":"{{ restore_selection }}","next_safe_action":"monitor the re-enabled source timer and retain checkpoint evidence"}'
-        dest: '{{ restore_controller_state_dir }}/{{ restore_selection }}.json'
+        content: '{"phase":"VERIFIED","timestamp":"{{ restore_selected_timestamp }}"}'
+        dest: '{{ restore_controller_state_dir }}/{{ restore_selected_timestamp }}.json'
         mode: '0600'
       delegate_to: localhost
       become: false

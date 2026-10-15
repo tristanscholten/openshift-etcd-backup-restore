@@ -37,7 +37,7 @@ class CronJobManifestTests(unittest.TestCase):
         self.bin.mkdir()
         chroot = self.bin / 'chroot'
         chroot.write_text(
-            '#!/bin/sh\nset -eu\nroot=$1\nshift\ntarget=$1\nshift\nargument=$1\nexec "$root$target" "$root$argument"\n'
+            '#!/bin/sh\nset -eu\nroot=$1\nshift\ntarget=$1\nshift\nif [ "$target" = /usr/bin/oc ]; then\n  case "$*" in *spec.clusterID*) printf 11111111-1111-1111-1111-111111111111;; *) printf 4.20.3;; esac\n  exit 0\nfi\nif [ "$target" = /usr/bin/sha256sum ]; then\n  sha256sum "$root$1"\n  exit 0\nfi\nif [ "$target" = /usr/local/bin/cluster-backup.sh ]; then\n  exec "$root$target" "$root$1"\nfi\nexec "$root$target" "$@"\n'
         )
         chroot.chmod(0o700)
         docs = list(yaml.safe_load_all(MANIFEST.read_text()))
@@ -53,10 +53,10 @@ class CronJobManifestTests(unittest.TestCase):
 
     def complete_timestamps(self):
         return sorted(
-            marker.name.removeprefix('.ocp-etcd-cronjob-managed-')
-            for marker in self.backups.glob('.ocp-etcd-cronjob-managed-*')
-            if (self.backups / f'snapshot_{marker.name.removeprefix(".ocp-etcd-cronjob-managed-")}.db').is_file()
-            and (self.backups / f'static_kuberesources_{marker.name.removeprefix(".ocp-etcd-cronjob-managed-")}.tar.gz').is_file()
+            marker.name.removeprefix('.ocp-etcd-cronjob-managed-').removesuffix('.json')
+            for marker in self.backups.glob('.ocp-etcd-cronjob-managed-*.json')
+            if (self.backups / f'snapshot_{marker.name.removeprefix(".ocp-etcd-cronjob-managed-").removesuffix(".json")}.db').is_file()
+            and (self.backups / f'static_kuberesources_{marker.name.removeprefix(".ocp-etcd-cronjob-managed-").removesuffix(".json")}.tar.gz').is_file()
         )
 
     def test_manifest_has_bounded_single_node_privileged_cronjob(self):
@@ -100,7 +100,7 @@ class CronJobManifestTests(unittest.TestCase):
         self.assertEqual(self.complete_timestamps(), ['20261015T000000Z', '20261015T060000Z', '20261015T120000Z'])
         self.assertEqual(unrelated.read_text(), 'unmanaged')
         self.assertTrue((self.backups / 'snapshot_20261015T180000Z.db').is_file())
-        self.assertFalse((self.backups / '.ocp-etcd-cronjob-managed-20261015T180000Z').exists())
+        self.assertFalse((self.backups / '.ocp-etcd-cronjob-managed-20261015T180000Z.json').exists())
 
 
 if __name__ == '__main__':
