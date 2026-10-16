@@ -40,7 +40,7 @@ exec "$root$target" "$@"
 
 
 def build(scenario):
-    fixture = pathlib.Path(tempfile.mkdtemp(prefix='actual-restore-', dir=os.environ['TMPDIR']))
+    fixture = pathlib.Path(tempfile.mkdtemp(prefix='actual-restore-'))
     source = create_backup(fixture); trace = fixture / 'trace'; trace.write_text('')
     bindir = fixture / 'bin'; bindir.mkdir()
     exe(bindir / 'restore', f'#!/bin/sh\nprintf "restore\\n" >> "{trace}"\n')

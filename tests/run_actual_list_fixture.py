@@ -27,7 +27,7 @@ def pair(root, timestamp, corrupt=False):
 
 
 def main():
-    fixture = pathlib.Path(tempfile.mkdtemp(dir=os.environ['TMPDIR']))
+    fixture = pathlib.Path(tempfile.mkdtemp())
     try:
         root = fixture / 'backups'; pair(root, STAMP); pair(root, '20261015T060000Z', True)
         inventory = fixture / 'inventory.yml'; inventory.write_text('all:\n  children:\n    control_plane:\n      hosts:\n        source: {ansible_connection: local}\n')
