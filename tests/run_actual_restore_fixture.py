@@ -104,8 +104,7 @@ def run_interactive(args):
         os.execvp(args[0], args)
     transcript = ''
     answers = (
-        ('Enter one displayed backup timestamp', f'{STAMP}\r'),
-        ('Type RESTORE_<cluster-id>', f'RESTORE_{CLUSTER}\r'),
+        ('Enter one displayed backup timestamp', f'{STAMP}\rRESTORE_{CLUSTER}\r'),
     )
     answered = set()
     deadline = time.monotonic() + 90
