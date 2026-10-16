@@ -1,12 +1,16 @@
 #!/usr/bin/env python3
 """Disposable execution of actual CronJob shell and restore playbook; no cluster."""
 import argparse
+import errno
 import getpass
 import os
 import pathlib
+import pty
+import select
 import shutil
 import subprocess
 import tempfile
+import time
 import yaml
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -74,12 +78,14 @@ case "$*" in *readyz*) {'exit 7' if scenario == 'api-fail' else 'exit 0'};; *) e
     args = ['ansible-playbook', '-i', str(inventory), str(PLAYBOOK), '-e', 'ansible_become=false',
             '-e', f'backup_root={source}', '-e', f'backup_source_hostname={hosts[-1]}', '-e', 'recovery_host=cp0',
             '-e', f'restore_topology={"sno" if scenario in ("sno", "topology-mismatch") else "ha"}',
-            '-e', f'restore_selection={STAMP}', f'-e', f'expected_cluster_id={CLUSTER}', '-e', 'expected_ocp_version=4.20.3',
-            '-e', f'destructive_confirm=RESTORE_{CLUSTER}', '-e', f'post_api_kubeconfig={kubeconfig}',
+            '-e', f'expected_cluster_id={CLUSTER}', '-e', 'expected_ocp_version=4.20.3',
+            '-e', f'post_api_kubeconfig={kubeconfig}',
             '-e', f'restore_oc_path={bindir / "oc"}', '-e', f'restore_vendor_restore_script={bindir / "restore"}',
             '-e', f'restore_vendor_disable_script={bindir / "disable"}', '-e', f'restore_controller_state_dir={state}',
             '-e', f'restore_stage_dir={fixture / "stage"}', '-e', f'restore_stage_owner={getpass.getuser()}', '-e', f'restore_stage_group={getpass.getuser()}',
             '-e', f'restore_host_identity_path={identity_dir}/{{{{ inventory_hostname }}}}', '-e', f'restore_machine_config_path={config_dir}/{{{{ inventory_hostname }}}}', '-e', f'restore_os_release_path={os_release_dir}/{{{{ inventory_hostname }}}}']
+    if scenario != 'interactive-ha':
+        args.extend(['-e', f'restore_selection={STAMP}', '-e', f'destructive_confirm=RESTORE_{CLUSTER}'])
     args.extend(['-e', 'restore_api_retries=1', '-e', 'restore_api_delay=0'])
     if scenario == 'bad-pair': (source / f'snapshot_{STAMP}.db').write_text('corrupt')
     if scenario == 'cpms-mismatch':
@@ -90,17 +96,57 @@ case "$*" in *readyz*) {'exit 7' if scenario == 'api-fail' else 'exit 0'};; *) e
     return fixture, trace, state, args
 
 
+def run_interactive(args):
+    """Run Ansible through a real controlling terminal and answer each pause once."""
+    pid, fd = pty.fork()
+    if pid == 0:
+        os.tcsetpgrp(0, os.getpgrp())
+        os.execvp(args[0], args)
+    transcript = ''
+    answers = (
+        ('Enter one displayed backup timestamp', f'{STAMP}\r'),
+        ('Type RESTORE_<cluster-id>', f'RESTORE_{CLUSTER}\r'),
+    )
+    answered = set()
+    deadline = time.monotonic() + 90
+    while True:
+        if time.monotonic() > deadline:
+            os.kill(pid, 9)
+            os.waitpid(pid, 0)
+            raise AssertionError(f'interactive restore timed out:\n{transcript}')
+        ready, _, _ = select.select([fd], [], [], 1)
+        if ready:
+            try:
+                data = os.read(fd, 4096)
+            except OSError as exc:
+                if exc.errno != errno.EIO:
+                    raise
+                data = b''
+            transcript += data.decode(errors='replace')
+            for prompt, answer in answers:
+                if prompt in transcript and prompt not in answered:
+                    os.write(fd, answer.encode())
+                    answered.add(prompt)
+        waited, status = os.waitpid(pid, os.WNOHANG)
+        if waited:
+            return subprocess.CompletedProcess(args, os.waitstatus_to_exitcode(status), transcript, '')
+
+
 def run(scenario):
     fixture, trace, state, args = build(scenario)
     try:
-        result = subprocess.run(args, text=True, capture_output=True); out = result.stdout + result.stderr
+        result = run_interactive(args) if scenario == 'interactive-ha' else subprocess.run(args, text=True, capture_output=True)
+        out = result.stdout + result.stderr
         lines = trace.read_text().splitlines(); checkpoint = state / f'{STAMP}.json'
-        if scenario in ('sno', 'ha'):
+        if scenario in ('sno', 'ha', 'interactive-ha'):
             assert result.returncode == 0, out
             assert lines.count('restore') == 1 and not any(x.startswith('oc:') for x in lines[:lines.index('restore')]), lines
             assert lines.count('fence') == (0 if scenario == 'sno' else 3), lines
             assert 'VERIFIED' in checkpoint.read_text(), checkpoint.read_text()
-            if scenario == 'ha': assert 'unsupportedConfigOverrides":null' in lines[-1], lines
+            if scenario in ('ha', 'interactive-ha'): assert 'unsupportedConfigOverrides":null' in lines[-1], lines
+            if scenario == 'interactive-ha':
+                assert out.count('Enter one displayed backup timestamp') == 1, out
+                assert out.count('Type RESTORE_<cluster-id>') == 1, out
         else:
             assert result.returncode != 0, out
             if scenario == 'api-fail':
@@ -114,5 +160,5 @@ def run(scenario):
 
 
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser(); parser.add_argument('scenario', choices=['sno', 'ha', 'bad-pair', 'wrong-release', 'identity-mismatch', 'release-mismatch', 'rhcos-mismatch', 'topology-mismatch', 'cpms-mismatch', 'fence-fail', 'api-fail', 'rerun'])
+    parser = argparse.ArgumentParser(); parser.add_argument('scenario', choices=['sno', 'ha', 'interactive-ha', 'bad-pair', 'wrong-release', 'identity-mismatch', 'release-mismatch', 'rhcos-mismatch', 'topology-mismatch', 'cpms-mismatch', 'fence-fail', 'api-fail', 'rerun'])
     run(parser.parse_args().scenario)

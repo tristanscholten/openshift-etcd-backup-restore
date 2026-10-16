@@ -41,6 +41,8 @@ class RestoreContractTests(unittest.TestCase):
         self.assertIn(f'SIMULATED_ACTUAL_RESTORE_{scenario.upper().replace("-", "_")}_OK', result.stdout)
     def test_actual_cronjob_pair_to_sno_and_ha_restore(self):
         for scenario in ('sno', 'ha'): self.run_fixture(scenario)
+    def test_actual_ha_restore_prompts_once_for_selection_and_confirmation(self):
+        self.run_fixture('interactive-ha')
     def test_fail_closed_before_vendor_restore_and_checkpoint_failures(self):
         for scenario in ('bad-pair', 'wrong-release', 'identity-mismatch', 'release-mismatch', 'rhcos-mismatch', 'topology-mismatch', 'cpms-mismatch', 'fence-fail', 'api-fail', 'rerun'): self.run_fixture(scenario)
     def test_discovery_hashes_large_files_in_bounded_chunks(self):
