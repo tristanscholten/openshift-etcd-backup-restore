@@ -25,7 +25,7 @@ def create_backup(fixture, hosts):
     backups.mkdir(parents=True); (host / 'usr/local/bin').mkdir(parents=True)
     exe(host / 'usr/local/bin/cluster-backup.sh', f'#!/bin/sh\nprintf snapshot > "$1/snapshot_{STAMP}.db"\nprintf resources > "$1/static_kuberesources_{STAMP}.tar.gz"\n')
     bindir = fixture / 'cron-bin'; bindir.mkdir()
-    node_lines = ''.join(f'{name}|11111111-1111-1111-1111-1111111111{index:02}|rendered-master-{index}\n' for index, name in enumerate(hosts))
+    node_lines = ''.join(f'{name}|11111111-1111-1111-1111-1111111111{index:02}|rendered-master-{index}|Red Hat Enterprise Linux CoreOS 420.92.20261001\n' for index, name in enumerate(hosts))
     exe(bindir / 'chroot', f'''#!/bin/sh
 root=$1; shift; target=$1; shift
 if [ "$target" = /usr/bin/oc ]; then
@@ -58,12 +58,14 @@ def build(scenario):
 printf "oc:$*\\n" >> "{trace}"
 case "$*" in *readyz*) {'exit 7' if scenario == 'api-fail' else 'exit 0'};; *) exit 0;; esac
 ''')
-    identity_dir = fixture / 'identity'; config_dir = fixture / 'config'; identity_dir.mkdir(); config_dir.mkdir()
+    identity_dir = fixture / 'identity'; config_dir = fixture / 'config'; os_release_dir = fixture / 'os-release'; identity_dir.mkdir(); config_dir.mkdir(); os_release_dir.mkdir()
     for index, name in enumerate(hosts):
         (identity_dir / name).write_text(f'11111111-1111-1111-1111-1111111111{index:02}\n')
         (config_dir / name).write_text('{"metadata":{"name":"rendered-master-' + str(index) + '"}}')
+        (os_release_dir / name).write_text('PRETTY_NAME="Red Hat Enterprise Linux CoreOS 420.92.20261001"\n')
     if scenario == 'identity-mismatch': (identity_dir / 'cp0').write_text('22222222-2222-2222-2222-222222222222\\n')
     if scenario == 'release-mismatch': (config_dir / 'cp0').write_text('{"metadata":{"name":"rendered-master-wrong"}}')
+    if scenario == 'rhcos-mismatch': (os_release_dir / 'cp0').write_text('PRETTY_NAME="Red Hat Enterprise Linux CoreOS 420.93.20261002"\n')
     if scenario == 'topology-mismatch': hosts = ['cp0', 'cp1', 'cp2']
     inventory = fixture / 'inventory.yml'
     inventory.write_text('all:\n  children:\n    control_plane:\n      hosts:\n' + ''.join(f'        {h}: {{ansible_connection: local}}\n' for h in hosts))
@@ -77,7 +79,7 @@ case "$*" in *readyz*) {'exit 7' if scenario == 'api-fail' else 'exit 0'};; *) e
             '-e', f'restore_oc_path={bindir / "oc"}', '-e', f'restore_vendor_restore_script={bindir / "restore"}',
             '-e', f'restore_vendor_disable_script={bindir / "disable"}', '-e', f'restore_controller_state_dir={state}',
             '-e', f'restore_stage_dir={fixture / "stage"}', '-e', f'restore_stage_owner={getpass.getuser()}', '-e', f'restore_stage_group={getpass.getuser()}',
-            '-e', f'restore_host_identity_path={identity_dir}/{{{{ inventory_hostname }}}}', '-e', f'restore_machine_config_path={config_dir}/{{{{ inventory_hostname }}}}']
+            '-e', f'restore_host_identity_path={identity_dir}/{{{{ inventory_hostname }}}}', '-e', f'restore_machine_config_path={config_dir}/{{{{ inventory_hostname }}}}', '-e', f'restore_os_release_path={os_release_dir}/{{{{ inventory_hostname }}}}']
     args.extend(['-e', 'restore_api_retries=1', '-e', 'restore_api_delay=0'])
     if scenario == 'bad-pair': (source / f'snapshot_{STAMP}.db').write_text('corrupt')
     if scenario == 'cpms-mismatch':
@@ -112,5 +114,5 @@ def run(scenario):
 
 
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser(); parser.add_argument('scenario', choices=['sno', 'ha', 'bad-pair', 'wrong-release', 'identity-mismatch', 'release-mismatch', 'topology-mismatch', 'cpms-mismatch', 'fence-fail', 'api-fail', 'rerun'])
+    parser = argparse.ArgumentParser(); parser.add_argument('scenario', choices=['sno', 'ha', 'bad-pair', 'wrong-release', 'identity-mismatch', 'release-mismatch', 'rhcos-mismatch', 'topology-mismatch', 'cpms-mismatch', 'fence-fail', 'api-fail', 'rerun'])
     run(parser.parse_args().scenario)

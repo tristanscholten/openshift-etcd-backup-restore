@@ -10,6 +10,7 @@ import sys
 
 UUID = re.compile(r"^[0-9a-fA-F]{8}-(?:[0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}$")
 SAFE_NAME = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_.-]*$")
+OS_IMAGE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 ._()/-]{0,255}$")
 
 
 def read_regular(path: str) -> str:
@@ -19,12 +20,24 @@ def read_regular(path: str) -> str:
     return candidate.read_text(encoding="utf-8").strip()
 
 
+def os_image(path: str) -> str:
+    for line in read_regular(path).splitlines():
+        if line.startswith("PRETTY_NAME="):
+            value = line.removeprefix("PRETTY_NAME=").strip()
+            if len(value) >= 2 and value[0] == value[-1] == '"':
+                value = value[1:-1]
+            if OS_IMAGE.fullmatch(value):
+                return value
+    raise ValueError("invalid host-local RHCOS PRETTY_NAME")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--manifest-base64", required=True)
     parser.add_argument("--inventory-host", required=True)
     parser.add_argument("--identity-path", required=True)
     parser.add_argument("--machine-config-path", required=True)
+    parser.add_argument("--os-release-path", required=True)
     args = parser.parse_args()
     if not SAFE_NAME.fullmatch(args.inventory_host):
         raise ValueError("unsafe inventory hostname")
@@ -38,17 +51,22 @@ def main() -> None:
     entry = matching[0]
     expected_uuid = entry.get("system_uuid")
     expected_config = entry.get("machine_config")
+    expected_os_image = entry.get("os_image")
     if not isinstance(expected_uuid, str) or not UUID.fullmatch(expected_uuid):
         raise ValueError("invalid captured host identity")
     if not isinstance(expected_config, str) or not SAFE_NAME.fullmatch(expected_config):
         raise ValueError("invalid captured machine configuration")
+    if not isinstance(expected_os_image, str) or not OS_IMAGE.fullmatch(expected_os_image):
+        raise ValueError("invalid captured RHCOS build")
     actual_uuid = read_regular(args.identity_path)
     if actual_uuid.lower() != expected_uuid.lower():
         raise ValueError("control-plane host identity mismatch")
     current_config = json.loads(read_regular(args.machine_config_path))
     actual_config = current_config.get("metadata", {}).get("name")
     if actual_config != expected_config:
-        raise ValueError("control-plane installed release configuration mismatch")
+        raise ValueError("control-plane MachineConfig mismatch")
+    if os_image(args.os_release_path) != expected_os_image:
+        raise ValueError("control-plane installed RHCOS build mismatch")
     print(json.dumps({"inventory_host": args.inventory_host, "validated": True}, sort_keys=True))
 
 

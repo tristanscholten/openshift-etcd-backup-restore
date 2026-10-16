@@ -22,7 +22,7 @@ def pair(root, timestamp, corrupt=False):
     data = {'schema': 1, 'timestamp': timestamp, 'snapshot': snapshot.name, 'static_resources': resources.name,
             'cluster_id': '11111111-1111-1111-1111-111111111111', 'ocp_version': '4.20.3',
             'snapshot_sha256': hashlib.sha256(snapshot.read_bytes()).hexdigest(), 'static_resources_sha256': hashlib.sha256(resources.read_bytes()).hexdigest(),
-            'topology': 'sno', 'cpms_enabled': False, 'control_plane': [{'node_name': 'source', 'system_uuid': '22222222-2222-2222-2222-222222222222', 'machine_config': 'rendered-master-0'}]}
+            'topology': 'sno', 'cpms_enabled': False, 'control_plane': [{'node_name': 'source', 'system_uuid': '22222222-2222-2222-2222-222222222222', 'machine_config': 'rendered-master-0', 'os_image': 'Red Hat Enterprise Linux CoreOS 420.92.20261001'}]}
     (root / f'{PREFIX}{timestamp}.json').write_text(json.dumps(data))
     if corrupt: snapshot.write_text('corrupt')
 

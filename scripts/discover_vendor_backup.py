@@ -10,6 +10,7 @@ import sys
 STAMP = re.compile(r"^[0-9]{8}T[0-9]{6}Z$")
 VERSION = re.compile(r"^4\.20\.[0-9]+$")
 UUID = re.compile(r"^[0-9a-fA-F]{8}-(?:[0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}$")
+OS_IMAGE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 ._()/-]{0,255}$")
 PREFIX = ".ocp-etcd-cronjob-managed-"
 
 
@@ -52,11 +53,11 @@ def validate(root, timestamp):
     for record in records:
         if not isinstance(record, dict):
             raise ValueError("invalid control-plane record")
-        name, identity, config = record.get("node_name"), record.get("system_uuid"), record.get("machine_config")
+        name, identity, config, os_image = record.get("node_name"), record.get("system_uuid"), record.get("machine_config"), record.get("os_image")
         if not isinstance(name, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", name):
             raise ValueError("invalid captured node name")
-        if not isinstance(identity, str) or not UUID.fullmatch(identity) or not isinstance(config, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", config):
-            raise ValueError("invalid captured host identity or release configuration")
+        if not isinstance(identity, str) or not UUID.fullmatch(identity) or not isinstance(config, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", config) or not isinstance(os_image, str) or not OS_IMAGE.fullmatch(os_image):
+            raise ValueError("invalid captured host identity, configuration, or RHCOS build")
         names.add(name)
         identities.add(identity.lower())
     if len(names) != expected_count or len(identities) != expected_count:

@@ -132,21 +132,21 @@ spec:
                   resources_sha256=$(chroot "$host_root" /usr/bin/sha256sum "/home/core/etcd-backups/static_kuberesources_${timestamp}.tar.gz" | awk '{print $1}')
                   [[ $snapshot_sha256 =~ ^[0-9a-f]{64}$ && $resources_sha256 =~ ^[0-9a-f]{64}$ ]] || exit 1
 
-                  # Bind this pair to the healthy control-plane topology. Node systemUUID
-                  # and current MachineConfig are independently checked over SSH before
-                  # any restore fencing; CPMS snapshots are deliberately ineligible.
-                  mapfile -t control_plane < <(chroot "$host_root" /usr/bin/oc --kubeconfig /etc/kubernetes/kubeconfig get nodes -l node-role.kubernetes.io/control-plane -o jsonpath='{range .items[*]}{.metadata.name}{"|"}{.status.nodeInfo.systemUUID}{"|"}{.metadata.annotations.machineconfiguration\\.openshift\\.io/currentConfig}{"\\n"}{end}')
+                  # Bind this pair to the healthy control-plane topology. Kubelet reports
+                  # nodeInfo.osImage from each host's installed /etc/os-release; it is a
+                  # RHCOS build identity, deliberately separate from cluster OCP release.
+                  mapfile -t control_plane < <(chroot "$host_root" /usr/bin/oc --kubeconfig /etc/kubernetes/kubeconfig get nodes -l node-role.kubernetes.io/control-plane -o jsonpath='{range .items[*]}{.metadata.name}{"|"}{.status.nodeInfo.systemUUID}{"|"}{.metadata.annotations.machineconfiguration\\.openshift\\.io/currentConfig}{"|"}{.status.nodeInfo.osImage}{"\\n"}{end}')
                   [[ ${#control_plane[@]} -eq 1 || ${#control_plane[@]} -eq 3 ]] || { echo "unsupported control-plane topology" >&2; exit 1; }
                   topology=sno
                   [[ ${#control_plane[@]} -eq 3 ]] && topology=ha
                   control_plane_json=''
                   seen_identities=' '
                   for record in "${control_plane[@]}"; do
-                    IFS='|' read -r node_name system_uuid machine_config <<< "$record"
-                    [[ $node_name =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ && $system_uuid =~ ^[0-9a-fA-F-]{36}$ && $machine_config =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ ]] || { echo "invalid healthy control-plane identity" >&2; exit 1; }
+                    IFS='|' read -r node_name system_uuid machine_config os_image <<< "$record"
+                    [[ $node_name =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ && $system_uuid =~ ^[0-9a-fA-F-]{36}$ && $machine_config =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ && $os_image =~ ^[A-Za-z0-9][A-Za-z0-9\ ._\(\)/-]{0,255}$ ]] || { echo "invalid healthy control-plane identity or RHCOS build" >&2; exit 1; }
                     [[ $seen_identities != *" $system_uuid "* ]] || { echo "duplicate healthy control-plane identity" >&2; exit 1; }
                     seen_identities+="$system_uuid "
-                    record_json=$(printf '{"node_name":"%s","system_uuid":"%s","machine_config":"%s"}' "$node_name" "$system_uuid" "$machine_config")
+                    record_json=$(printf '{"node_name":"%s","system_uuid":"%s","machine_config":"%s","os_image":"%s"}' "$node_name" "$system_uuid" "$machine_config" "$os_image")
                     control_plane_json+="${control_plane_json:+,}${record_json}"
                   done
                   if cpms_error=$(chroot "$host_root" /usr/bin/oc --kubeconfig /etc/kubernetes/kubeconfig get controlplanemachineset.machine.openshift.io cluster -n openshift-machine-api 2>&1); then
