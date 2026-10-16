@@ -1,0 +1,186 @@
+# yamllint disable rule:line-length
+# Replace REPLACE_WITH_ONE_CONTROL_PLANE_HOSTNAME before applying.
+---
+# This is a custom scheduler around the vendor-installed host script; it does
+# not enable the Technology Preview OpenShift Backup CR feature.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: etcd-backup-system
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: etcd-backup
+  namespace: etcd-backup-system
+automountServiceAccountToken: false
+---
+# Allow only this service account to select the existing privileged SCC.
+# SCC use is cluster-scoped; this grants no other cluster permission.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: use-privileged-scc
+rules:
+  - apiGroups: ["security.openshift.io"]
+    resources: ["securitycontextconstraints"]
+    resourceNames: ["privileged"]
+    verbs: ["use"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: etcd-backup-use-privileged-scc
+subjects:
+  - kind: ServiceAccount
+    name: etcd-backup
+    namespace: etcd-backup-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: use-privileged-scc
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: etcd-backup
+  namespace: etcd-backup-system
+spec:
+  schedule: "0 */6 * * *"
+  timeZone: "UTC"
+  concurrencyPolicy: Forbid
+  startingDeadlineSeconds: 1800
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      activeDeadlineSeconds: 1800
+      template:
+        spec:
+          serviceAccountName: etcd-backup
+          automountServiceAccountToken: false
+          # The chrooted vendor script uses the host kubeconfig and host etcd
+          # endpoint. Host networking supplies that runtime context.
+          hostNetwork: true
+          restartPolicy: Never
+          nodeSelector:
+            # REQUIRED: replace with exactly one selected control-plane hostname.
+            kubernetes.io/hostname: REPLACE_WITH_ONE_CONTROL_PLANE_HOSTNAME
+          tolerations:
+            - key: node-role.kubernetes.io/control-plane
+              operator: Exists
+              effect: NoSchedule
+            - key: node-role.kubernetes.io/master
+              operator: Exists
+              effect: NoSchedule
+          containers:
+            - name: backup
+              image: registry.access.redhat.com/ubi9/ubi:latest
+              imagePullPolicy: IfNotPresent
+              securityContext:
+                privileged: true
+                runAsUser: 0
+                allowPrivilegeEscalation: true
+                readOnlyRootFilesystem: true
+              command: ["/bin/bash", "-ceu", "--"]
+              args:
+                - |
+                  set -o pipefail
+                  host_root=${HOST_ROOT:-/host}
+                  backup_dir="$host_root/home/core/etcd-backups"
+                  managed_prefix=.ocp-etcd-cronjob-managed-
+
+                  # The host path is root-private. Keep any existing files intact.
+                  mkdir -p "$backup_dir"
+                  chmod 0700 "$backup_dir"
+
+                  declare -A before
+                  while IFS= read -r -d '' path; do
+                    before["${path##*/}"]=1
+                  done < <(find "$backup_dir" -maxdepth 1 -type f \( -name 'snapshot_*.db' -o -name 'static_kuberesources_*.tar.gz' \) -print0)
+
+                  # OpenShift documents this exact host-side command after chroot /host.
+                  chroot "$host_root" /usr/local/bin/cluster-backup.sh /home/core/etcd-backups
+
+                  new_timestamps=()
+                  for snapshot in "$backup_dir"/snapshot_*.db; do
+                    [[ -f "$snapshot" && ! -L "$snapshot" ]] || continue
+                    timestamp=${snapshot##*/snapshot_}
+                    timestamp=${timestamp%.db}
+                    resources="$backup_dir/static_kuberesources_${timestamp}.tar.gz"
+                    [[ -f "$resources" && ! -L "$resources" ]] || continue
+                    [[ -z ${before["${snapshot##*/}"]+x} ]] || continue
+                    [[ -z ${before["${resources##*/}"]+x} ]] || continue
+                    new_timestamps+=("$timestamp")
+                  done
+                  [[ ${#new_timestamps[@]} -eq 1 ]] || {
+                    echo "vendor backup did not create exactly one new complete pair" >&2
+                    exit 1
+                  }
+
+                  timestamp=${new_timestamps[0]}
+                  # Record the minimum healthy-cluster identity needed to safely
+                  # select this ordinary vendor pair while the API is still alive.
+                  cluster_id=$(chroot "$host_root" /usr/bin/oc --kubeconfig /etc/kubernetes/kubeconfig get clusterversion/version -o jsonpath='{.spec.clusterID}')
+                  release=$(chroot "$host_root" /usr/bin/oc --kubeconfig /etc/kubernetes/kubeconfig get clusterversion/version -o jsonpath='{.status.desired.version}')
+                  [[ $cluster_id =~ ^[0-9a-fA-F-]{36}$ && $release =~ ^4\.20\.[0-9]+$ ]] || {
+                    echo "could not capture supported cluster release identity" >&2
+                    exit 1
+                  }
+                  snapshot_sha256=$(chroot "$host_root" /usr/bin/sha256sum "/home/core/etcd-backups/snapshot_${timestamp}.db" | awk '{print $1}')
+                  resources_sha256=$(chroot "$host_root" /usr/bin/sha256sum "/home/core/etcd-backups/static_kuberesources_${timestamp}.tar.gz" | awk '{print $1}')
+                  [[ $snapshot_sha256 =~ ^[0-9a-f]{64}$ && $resources_sha256 =~ ^[0-9a-f]{64}$ ]] || exit 1
+
+                  # Bind this pair to the healthy control-plane topology. Kubelet reports
+                  # nodeInfo.osImage from each host's installed /etc/os-release; it is a
+                  # RHCOS build identity, deliberately separate from cluster OCP release.
+                  mapfile -t control_plane < <(chroot "$host_root" /usr/bin/oc --kubeconfig /etc/kubernetes/kubeconfig get nodes -l node-role.kubernetes.io/control-plane -o jsonpath='{range .items[*]}{.metadata.name}{"|"}{.status.nodeInfo.systemUUID}{"|"}{.metadata.annotations.machineconfiguration\\.openshift\\.io/currentConfig}{"|"}{.status.nodeInfo.osImage}{"\\n"}{end}')
+                  [[ ${#control_plane[@]} -eq 1 || ${#control_plane[@]} -eq 3 ]] || { echo "unsupported control-plane topology" >&2; exit 1; }
+                  topology=sno
+                  [[ ${#control_plane[@]} -eq 3 ]] && topology=ha
+                  control_plane_json=''
+                  seen_identities=' '
+                  for record in "${control_plane[@]}"; do
+                    IFS='|' read -r node_name system_uuid machine_config os_image <<< "$record"
+                    [[ $node_name =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ && $system_uuid =~ ^[0-9a-fA-F-]{36}$ && $machine_config =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ && $os_image =~ ^[A-Za-z0-9][A-Za-z0-9\ ._\(\)/-]{0,255}$ ]] || { echo "invalid healthy control-plane identity or RHCOS build" >&2; exit 1; }
+                    [[ $seen_identities != *" $system_uuid "* ]] || { echo "duplicate healthy control-plane identity" >&2; exit 1; }
+                    seen_identities+="$system_uuid "
+                    record_json=$(printf '{"node_name":"%s","system_uuid":"%s","machine_config":"%s","os_image":"%s"}' "$node_name" "$system_uuid" "$machine_config" "$os_image")
+                    control_plane_json+="${control_plane_json:+,}${record_json}"
+                  done
+                  if cpms_error=$(chroot "$host_root" /usr/bin/oc --kubeconfig /etc/kubernetes/kubeconfig get controlplanemachineset.machine.openshift.io cluster -n openshift-machine-api 2>&1); then
+                    echo "CPMS snapshots are not supported by this restore path" >&2; exit 1
+                  fi
+                  [[ $cpms_error == *NotFound* ]] || { echo "CPMS discovery failed" >&2; exit 1; }
+
+                  # Only pairs with this complete manifest are eligible for pruning.
+                  umask 077
+                  printf '{"schema":1,"timestamp":"%s","snapshot":"snapshot_%s.db","static_resources":"static_kuberesources_%s.tar.gz","cluster_id":"%s","ocp_version":"%s","snapshot_sha256":"%s","static_resources_sha256":"%s","topology":"%s","cpms_enabled":false,"control_plane":[%s]}\n' "$timestamp" "$timestamp" "$timestamp" "$cluster_id" "$release" "$snapshot_sha256" "$resources_sha256" "$topology" "$control_plane_json" > "$backup_dir/${managed_prefix}${timestamp}.json"
+
+                  managed_timestamps=()
+                  for marker in "$backup_dir"/${managed_prefix}*.json; do
+                    [[ -f "$marker" && ! -L "$marker" ]] || continue
+                    candidate=${marker##*/$managed_prefix}
+                    candidate=${candidate%.json}
+                    snapshot="$backup_dir/snapshot_${candidate}.db"
+                    resources="$backup_dir/static_kuberesources_${candidate}.tar.gz"
+                    [[ -f "$snapshot" && ! -L "$snapshot" ]] || continue
+                    [[ -f "$resources" && ! -L "$resources" ]] || continue
+                    managed_timestamps+=("$candidate")
+                  done
+
+                  # Prune only after the vendor command succeeded and its new complete pair was marked.
+                  while IFS= read -r obsolete; do
+                    rm -f -- "$backup_dir/snapshot_${obsolete}.db" \
+                      "$backup_dir/static_kuberesources_${obsolete}.tar.gz" \
+                      "$backup_dir/${managed_prefix}${obsolete}.json"
+                  done < <(printf '%s\n' "${managed_timestamps[@]}" | LC_ALL=C sort -r | tail -n +4)
+              volumeMounts:
+                - name: host-root
+                  mountPath: /host
+          volumes:
+            - name: host-root
+              hostPath:
+                path: /
+                type: Directory
