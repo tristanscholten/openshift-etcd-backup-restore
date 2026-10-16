@@ -37,7 +37,7 @@ class CronJobManifestTests(unittest.TestCase):
         self.bin.mkdir()
         chroot = self.bin / 'chroot'
         chroot.write_text(
-            '#!/bin/sh\nset -eu\nroot=$1\nshift\ntarget=$1\nshift\nif [ "$target" = /usr/bin/oc ]; then\n  case "$*" in *spec.clusterID*) printf 11111111-1111-1111-1111-111111111111;; *) printf 4.20.3;; esac\n  exit 0\nfi\nif [ "$target" = /usr/bin/sha256sum ]; then\n  sha256sum "$root$1"\n  exit 0\nfi\nif [ "$target" = /usr/local/bin/cluster-backup.sh ]; then\n  exec "$root$target" "$root$1"\nfi\nexec "$root$target" "$@"\n'
+            '#!/bin/sh\nset -eu\nroot=$1\nshift\ntarget=$1\nshift\nif [ "$target" = /usr/bin/oc ]; then\n  case "$*" in\n    *controlplanemachineset*) echo NotFound >&2; exit 1;;\n    *node-role.kubernetes.io/control-plane*) printf "cp0|11111111-1111-1111-1111-111111111100|rendered-master-0\\n"; exit 0;;\n    *spec.clusterID*) printf 11111111-1111-1111-1111-111111111111; exit 0;;\n    *) printf 4.20.3; exit 0;;\n  esac\nfi\nif [ "$target" = /usr/bin/sha256sum ]; then\n  sha256sum "$root$1"\n  exit 0\nfi\nif [ "$target" = /usr/local/bin/cluster-backup.sh ]; then\n  exec "$root$target" "$root$1"\nfi\nexec "$root$target" "$@"\n'
         )
         chroot.chmod(0o700)
         docs = list(yaml.safe_load_all(MANIFEST.read_text()))

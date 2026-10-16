@@ -42,7 +42,21 @@ class RestoreContractTests(unittest.TestCase):
     def test_actual_cronjob_pair_to_sno_and_ha_restore(self):
         for scenario in ('sno', 'ha'): self.run_fixture(scenario)
     def test_fail_closed_before_vendor_restore_and_checkpoint_failures(self):
-        for scenario in ('bad-pair', 'wrong-release', 'fence-fail', 'api-fail', 'rerun'): self.run_fixture(scenario)
+        for scenario in ('bad-pair', 'wrong-release', 'identity-mismatch', 'release-mismatch', 'topology-mismatch', 'cpms-mismatch', 'fence-fail', 'api-fail', 'rerun'): self.run_fixture(scenario)
+    def test_discovery_hashes_large_files_in_bounded_chunks(self):
+        root = pathlib.Path(tempfile.mkdtemp())
+        try:
+            timestamp = '20261015T000000Z'
+            snapshot = root / f'snapshot_{timestamp}.db'; resources = root / f'static_kuberesources_{timestamp}.tar.gz'
+            snapshot.write_bytes(b'a' * (2 * 1024 * 1024 + 1)); resources.write_bytes(b'b' * (2 * 1024 * 1024 + 1))
+            import hashlib, json
+            manifest = {'schema': 1, 'timestamp': timestamp, 'snapshot': snapshot.name, 'static_resources': resources.name, 'cluster_id': '11111111-1111-1111-1111-111111111111', 'ocp_version': '4.20.3', 'snapshot_sha256': hashlib.sha256(snapshot.read_bytes()).hexdigest(), 'static_resources_sha256': hashlib.sha256(resources.read_bytes()).hexdigest(), 'topology': 'sno', 'cpms_enabled': False, 'control_plane': [{'node_name': 'cp0', 'system_uuid': '22222222-2222-2222-2222-222222222222', 'machine_config': 'rendered-master-0'}]}
+            (root / f'.ocp-etcd-cronjob-managed-{timestamp}.json').write_text(json.dumps(manifest))
+            result = subprocess.run([sys.executable, str(ROOT / 'scripts/discover_vendor_backup.py'), str(root), timestamp], text=True, capture_output=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+        finally:
+            shutil.rmtree(root)
+
     def test_actual_list_playbook_excludes_corrupt_candidate(self):
         result = subprocess.run([sys.executable, str(ACTUAL_LIST_FIXTURE)], text=True, capture_output=True)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)

@@ -131,9 +131,32 @@ spec:
                   snapshot_sha256=$(chroot "$host_root" /usr/bin/sha256sum "/home/core/etcd-backups/snapshot_${timestamp}.db" | awk '{print $1}')
                   resources_sha256=$(chroot "$host_root" /usr/bin/sha256sum "/home/core/etcd-backups/static_kuberesources_${timestamp}.tar.gz" | awk '{print $1}')
                   [[ $snapshot_sha256 =~ ^[0-9a-f]{64}$ && $resources_sha256 =~ ^[0-9a-f]{64}$ ]] || exit 1
+
+                  # Bind this pair to the healthy control-plane topology. Node systemUUID
+                  # and current MachineConfig are independently checked over SSH before
+                  # any restore fencing; CPMS snapshots are deliberately ineligible.
+                  mapfile -t control_plane < <(chroot "$host_root" /usr/bin/oc --kubeconfig /etc/kubernetes/kubeconfig get nodes -l node-role.kubernetes.io/control-plane -o jsonpath='{range .items[*]}{.metadata.name}{"|"}{.status.nodeInfo.systemUUID}{"|"}{.metadata.annotations.machineconfiguration\\.openshift\\.io/currentConfig}{"\\n"}{end}')
+                  [[ ${#control_plane[@]} -eq 1 || ${#control_plane[@]} -eq 3 ]] || { echo "unsupported control-plane topology" >&2; exit 1; }
+                  topology=sno
+                  [[ ${#control_plane[@]} -eq 3 ]] && topology=ha
+                  control_plane_json=''
+                  seen_identities=' '
+                  for record in "${control_plane[@]}"; do
+                    IFS='|' read -r node_name system_uuid machine_config <<< "$record"
+                    [[ $node_name =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ && $system_uuid =~ ^[0-9a-fA-F-]{36}$ && $machine_config =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ ]] || { echo "invalid healthy control-plane identity" >&2; exit 1; }
+                    [[ $seen_identities != *" $system_uuid "* ]] || { echo "duplicate healthy control-plane identity" >&2; exit 1; }
+                    seen_identities+="$system_uuid "
+                    record_json=$(printf '{"node_name":"%s","system_uuid":"%s","machine_config":"%s"}' "$node_name" "$system_uuid" "$machine_config")
+                    control_plane_json+="${control_plane_json:+,}${record_json}"
+                  done
+                  if cpms_error=$(chroot "$host_root" /usr/bin/oc --kubeconfig /etc/kubernetes/kubeconfig get controlplanemachineset.machine.openshift.io cluster -n openshift-machine-api 2>&1); then
+                    echo "CPMS snapshots are not supported by this restore path" >&2; exit 1
+                  fi
+                  [[ $cpms_error == *NotFound* ]] || { echo "CPMS discovery failed" >&2; exit 1; }
+
                   # Only pairs with this complete manifest are eligible for pruning.
                   umask 077
-                  printf '{"schema":1,"timestamp":"%s","snapshot":"snapshot_%s.db","static_resources":"static_kuberesources_%s.tar.gz","cluster_id":"%s","ocp_version":"%s","snapshot_sha256":"%s","static_resources_sha256":"%s"}\n' "$timestamp" "$timestamp" "$timestamp" "$cluster_id" "$release" "$snapshot_sha256" "$resources_sha256" > "$backup_dir/${managed_prefix}${timestamp}.json"
+                  printf '{"schema":1,"timestamp":"%s","snapshot":"snapshot_%s.db","static_resources":"static_kuberesources_%s.tar.gz","cluster_id":"%s","ocp_version":"%s","snapshot_sha256":"%s","static_resources_sha256":"%s","topology":"%s","cpms_enabled":false,"control_plane":[%s]}\n' "$timestamp" "$timestamp" "$timestamp" "$cluster_id" "$release" "$snapshot_sha256" "$resources_sha256" "$topology" "$control_plane_json" > "$backup_dir/${managed_prefix}${timestamp}.json"
 
                   managed_timestamps=()
                   for marker in "$backup_dir"/${managed_prefix}*.json; do

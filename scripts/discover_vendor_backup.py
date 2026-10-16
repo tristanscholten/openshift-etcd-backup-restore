@@ -18,7 +18,11 @@ def regular(path):
 
 
 def sha256(path):
-    return hashlib.sha256(path.read_bytes()).hexdigest()
+    digest = hashlib.sha256()
+    with path.open("rb") as source:
+        for chunk in iter(lambda: source.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def validate(root, timestamp):
@@ -33,13 +37,30 @@ def validate(root, timestamp):
     if not all(regular(path) for path in (manifest, snapshot, resources)):
         raise ValueError("incomplete vendor backup pair")
     data = json.loads(manifest.read_text(encoding="utf-8"))
-    required = {"schema", "timestamp", "snapshot", "static_resources", "cluster_id", "ocp_version", "snapshot_sha256", "static_resources_sha256"}
+    required = {"schema", "timestamp", "snapshot", "static_resources", "cluster_id", "ocp_version", "snapshot_sha256", "static_resources_sha256", "topology", "cpms_enabled", "control_plane"}
     if not required <= data.keys() or data["schema"] != 1 or data["timestamp"] != timestamp:
         raise ValueError("invalid backup manifest")
     if data["snapshot"] != snapshot.name or data["static_resources"] != resources.name:
         raise ValueError("mismatched backup pair")
     if not VERSION.fullmatch(data["ocp_version"]) or not UUID.fullmatch(data["cluster_id"]):
         raise ValueError("invalid backup release or cluster identity")
+    expected_count = 1 if data["topology"] == "sno" else 3 if data["topology"] == "ha" else 0
+    records = data["control_plane"]
+    if data["cpms_enabled"] is not False or not isinstance(records, list) or len(records) != expected_count:
+        raise ValueError("unsupported captured topology or CPMS state")
+    names, identities = set(), set()
+    for record in records:
+        if not isinstance(record, dict):
+            raise ValueError("invalid control-plane record")
+        name, identity, config = record.get("node_name"), record.get("system_uuid"), record.get("machine_config")
+        if not isinstance(name, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", name):
+            raise ValueError("invalid captured node name")
+        if not isinstance(identity, str) or not UUID.fullmatch(identity) or not isinstance(config, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", config):
+            raise ValueError("invalid captured host identity or release configuration")
+        names.add(name)
+        identities.add(identity.lower())
+    if len(names) != expected_count or len(identities) != expected_count:
+        raise ValueError("duplicate captured control-plane identity")
     if data["snapshot_sha256"] != sha256(snapshot) or data["static_resources_sha256"] != sha256(resources):
         raise ValueError("backup manifest hash mismatch")
     return data

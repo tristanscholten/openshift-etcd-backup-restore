@@ -15,8 +15,9 @@
     expected_cluster_id: ''
     expected_ocp_version: ''
     destructive_confirm: ''
-    restore_cpms_enabled: ''
     restore_mode: apply
+    restore_host_identity_path: /sys/class/dmi/id/product_uuid
+    restore_machine_config_path: /etc/machine-config-daemon/currentconfig
     restore_vendor_restore_script: /usr/local/bin/cluster-restore.sh
     restore_vendor_disable_script: /usr/local/bin/disable-etcd.sh
     restore_oc_path: ''
@@ -35,7 +36,8 @@
           - backup_source_hostname in groups['control_plane']
           - recovery_host in groups['control_plane']
           - (groups['control_plane'] | length == 1 and restore_topology == 'sno') or (groups['control_plane'] | length == 3 and restore_topology == 'ha')
-          - restore_cpms_enabled == 'false'
+          - restore_host_identity_path is match('^/\S+$')
+          - restore_machine_config_path is match('^/\S+$')
           - expected_cluster_id is match('^[0-9a-fA-F]{8}-(?:[0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}$')
           - expected_ocp_version is match('^4\.20\.[0-9]+$')
         fail_msg: 'Supported recovery is OCP 4.20 SNO or three-host non-CPMS HA with explicit cluster/release identity; no mutation occurred.'
@@ -83,13 +85,25 @@
       changed_when: false
       run_once: true
       register: restore_selected_manifest
-    - name: Require exact source release and cluster identity
+    - name: Require exact source release, topology, and cluster identity
       ansible.builtin.assert:
         that:
           - (restore_selected_manifest.stdout | from_json).cluster_id == expected_cluster_id
           - (restore_selected_manifest.stdout | from_json).ocp_version == expected_ocp_version
-        fail_msg: 'Selected pair does not match supplied cluster identity and exact OCP 4.20 z-stream; no mutation occurred.'
+          - (restore_selected_manifest.stdout | from_json).topology == restore_topology
+          - (restore_selected_manifest.stdout | from_json).cpms_enabled == false
+          - ((restore_selected_manifest.stdout | from_json).control_plane | map(attribute='node_name') | sort | list) == (groups['control_plane'] | sort)
+        fail_msg: 'Selected pair does not bind this exact non-CPMS control-plane inventory, topology, cluster identity, and OCP 4.20 z-stream; no mutation occurred.'
       run_once: true
+    - name: Verify every SSH target identity and installed release configuration offline
+      ansible.builtin.script:
+        cmd: >-
+          {{ playbook_dir }}/../scripts/validate_restore_host.py
+          --manifest-base64 '{{ restore_selected_manifest.stdout | trim | b64encode }}'
+          --inventory-host '{{ inventory_hostname }}'
+          --identity-path '{{ restore_host_identity_path }}'
+          --machine-config-path '{{ restore_machine_config_path }}'
+      changed_when: false
     - name: End read-only discovery and preflight
       ansible.builtin.meta: end_play
       when: restore_mode == 'preflight' or ansible_check_mode

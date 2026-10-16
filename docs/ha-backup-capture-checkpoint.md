@@ -23,7 +23,7 @@ Older schema-1 sets remain discoverable. Schema-2 SNO sets have no HA inventory.
 
 ## Stage 2 input
 
-Stage 2 must read the selected validated schema-2 HA set only. It must derive every non-recovery host-to-Machine mapping from this record, validate the stored pair digest, exact host set, recovery host, and reproduced SSH identities offline before mutation, and perform fresh read-only post-recovery reconciliation before any Machine deletion. It must not accept an extra-vars mapping override.
+The former Stage 2 schema-2/Machine reconciliation design is not used by the supported CronJob restore path. `playbooks/restore.yml` instead accepts only its schema-1 CronJob pair, verifies the manifest's exact inventory, DMI identities, and MachineConfigs offline before fencing, and never deletes Machines.
 
 ## Evidence
 

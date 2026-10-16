@@ -49,14 +49,14 @@ A node-local backup is not off-host DR and does not protect PV or application da
 
 ## Restore
 
-On a total control-plane outage, restore needs no old backup-role installation or helper. The CronJob writes a minimal root-private manifest beside each ordinary vendor pair while the healthy host API is available; it records the cluster UUID, exact desired OCP `4.20.z` release, and pair SHA-256 values. This is the release identity used by recovery; an `oc` client RPM version is not authoritative.
+On a total control-plane outage, restore needs no old backup-role installation or helper. The CronJob writes a minimal root-private manifest beside each ordinary vendor pair while the healthy host API is available; it records the cluster UUID, exact desired OCP `4.20.z` release, SHA-256 values, non-CPMS topology, and each control-plane Node system UUID/current MachineConfig. Before destructive work, Ansible requires the selected manifest to bind the exact inventory and validates every SSH target's DMI system UUID and installed MachineConfig offline. This is the release identity used by recovery; an `oc` client RPM version is not authoritative.
 
 For an owner-authorized OCP 4.20 recovery only, use one SSH Ansible invocation. It first discovers and displays complete pairs, prompts for one timestamp when `restore_selection` is omitted, validates the manifest before mutation, and then asks once for `RESTORE_<cluster-uuid>` if `destructive_confirm` is omitted:
 
 ```sh
 ansible-playbook -i inventory/hosts.yml playbooks/restore.yml \
   -e backup_source_hostname=SOURCE -e recovery_host=RECOVERY \
-  -e restore_topology=ha -e restore_cpms_enabled=false \
+  -e restore_topology=ha \
   -e expected_cluster_id=CLUSTER_UUID -e expected_ocp_version=4.20.Z \
   -e post_api_kubeconfig=/secure/path/kubeconfig \
   -e restore_oc_path=/absolute/path/to/oc
