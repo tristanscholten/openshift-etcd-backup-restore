@@ -104,9 +104,11 @@ def run_interactive(args):
         os.execvp(args[0], args)
     transcript = ''
     answers = (
-        ('Enter one displayed backup timestamp', f'{STAMP}\rRESTORE_{CLUSTER}\r'),
+        ('Enter one displayed backup timestamp', f'{STAMP}\r'),
+        ('Type RESTORE_<cluster-id>', f'RESTORE_{CLUSTER}\r'),
     )
     answered = set()
+    prompt_seen_at = {}
     deadline = time.monotonic() + 90
     while True:
         if time.monotonic() > deadline:
@@ -122,8 +124,14 @@ def run_interactive(args):
                     raise
                 data = b''
             transcript += data.decode(errors='replace')
-            for prompt, answer in answers:
-                if prompt in transcript and prompt not in answered:
+        now = time.monotonic()
+        for prompt, answer in answers:
+            if prompt in transcript and prompt not in answered:
+                # ansible-core displays the prompt immediately before it changes
+                # terminal settings and flushes queued input.  Wait until that
+                # setup has completed, then send one answer to the real tty.
+                prompt_seen_at.setdefault(prompt, now)
+                if now - prompt_seen_at[prompt] >= 0.25:
                     os.write(fd, answer.encode())
                     answered.add(prompt)
         waited, status = os.waitpid(pid, os.WNOHANG)
